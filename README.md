@@ -36,8 +36,10 @@ Each worker in the list carries: `session` (tmux name), `title`, `status`
 (`working | waiting | idle | done | unknown`), `tail` (recent pane output),
 `web_url` (claude.ai link once the remote-control bridge connects),
 `jsonl_age_s` (seconds since the session's event log last grew — ground truth
-for "actually doing something"), `claude_session_id`, `workdir`, `age_s`,
-`attached`.
+for "actually doing something"), `kind` (`task` by default; spawn accepts a
+`kind` so disposable periodic workers can be tagged and later reaped via the
+library's `reap_stale(kind, max_age_hours)`), `claude_session_id`, `workdir`,
+`age_s`, `attached`.
 
 ## How it works
 

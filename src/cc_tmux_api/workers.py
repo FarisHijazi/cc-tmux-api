@@ -205,6 +205,7 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
     _tmux("set-option", "-t", session, "@hq_title", title)
     _tmux("set-option", "-t", session, "@hq_sid", sid)
     _tmux("set-option", "-t", session, "@hq_workdir", workdir)
+    _tmux("set-option", "-t", session, "@hq_kind", kind)
     _tmux("set-option", "-t", session, "status-style", STATUS_STYLE)
     # shell-first: type the claude command into the shell so the pane survives
     # claude's exit; prompts via file to dodge quoting. --disallowedTools +
@@ -270,11 +271,13 @@ def list_workers(tail_lines: int = 14) -> list[dict]:
                     key=lambda x: x["created"], reverse=True):
         name = s["name"]
         title = _tmux("show-option", "-t", name, "-qv", "@hq_title").stdout.strip()
+        kind = _tmux("show-option", "-t", name, "-qv", "@hq_kind").stdout.strip()
         sid, wd = _session_opts(name)
         jsonl_age = _jsonl_age_s(name)
         out.append({
             "session": name,
             "title": title or name,
+            "kind": kind or "task",
             "status": status_of(name, jsonl_age),
             "attached": s["attached"],
             "age_s": int(time.time()) - s["created"],
@@ -326,6 +329,7 @@ def resume_registered() -> list[str]:
         _tmux("set-option", "-t", session, "@hq_title", meta.get("title", session))
         _tmux("set-option", "-t", session, "@hq_sid", sid)
         _tmux("set-option", "-t", session, "@hq_workdir", wd)
+        _tmux("set-option", "-t", session, "@hq_kind", meta.get("kind", "task"))
         _tmux("set-option", "-t", session, "status-style", STATUS_STYLE)
         # /tmp is wiped on reboot — recreate the shared headless system prompt
         PROMPT_DIR.mkdir(parents=True, exist_ok=True)
@@ -345,6 +349,24 @@ def resume_registered() -> list[str]:
         for session in loops:
             send_text(session, "continue")
     return revived
+
+
+def reap_stale(kind: str, max_age_hours: float) -> list[str]:
+    """Kill workers of the given kind (@hq_kind) older than max_age_hours and
+    return their names. Meant for disposable periodic workers whose next tick
+    respawns them; long-lived kinds should simply never be passed here.
+    Sessions without @hq_kind are treated as "task" and never match "routine"."""
+    cutoff = time.time() - max_age_hours * 3600
+    reaped = []
+    for s in _sessions():
+        name = s["name"]
+        if not name.startswith(PREFIX) or s["created"] >= cutoff:
+            continue
+        k = _tmux("show-option", "-t", name, "-qv", "@hq_kind").stdout.strip() or "task"
+        if k == kind:
+            kill(name)
+            reaped.append(name)
+    return reaped
 
 
 def registry_gc() -> list[str]:
