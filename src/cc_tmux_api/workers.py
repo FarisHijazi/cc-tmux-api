@@ -25,6 +25,7 @@ import json
 import os
 import re
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -98,6 +99,36 @@ def _sessions() -> list[dict]:
     return out
 
 
+def _sessions_full() -> list[dict]:
+    """_sessions() plus the @hq_* user options, in ONE tmux call — tmux formats
+    expand user options, so per-session show-option round-trips are unnecessary.
+    Title goes LAST with a bounded split: it's the only field that could ever
+    contain a tab (it comes from user input)."""
+    r = _tmux("list-sessions", "-F",
+              "#{session_name}\t#{session_created}\t#{session_attached}"
+              "\t#{@hq_kind}\t#{@hq_sid}\t#{@hq_workdir}\t#{@hq_title}")
+    if r.returncode != 0:  # no tmux server running
+        return []
+    out = []
+    for line in r.stdout.splitlines():
+        name, created, attached, kind, sid, wd, title = line.split("\t", 6)
+        out.append({"name": name, "created": int(created), "attached": attached == "1",
+                    "kind": kind, "sid": sid, "workdir": wd, "title": title})
+    return out
+
+
+def _pane_cmds() -> dict[str, str]:
+    """session name -> current pane command, in ONE tmux call (vs a
+    display-message per session)."""
+    r = _tmux("list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}")
+    out: dict[str, str] = {}
+    if r.returncode == 0:
+        for line in r.stdout.splitlines():
+            name, _, cmd = line.partition("\t")
+            out.setdefault(name, cmd)
+    return out
+
+
 def capture(session: str, lines: int = 60) -> str:
     r = _tmux("capture-pane", "-t", session, "-p", "-S", f"-{lines}")
     return r.stdout if r.returncode == 0 else ""
@@ -115,18 +146,21 @@ def _jsonl_path(sid: str, workdir: str) -> Path:
             / re.sub(r"[/.]", "-", workdir) / f"{sid}.jsonl")
 
 
-def _jsonl_age_s(session: str) -> int | None:
+def _jsonl_age(sid: str, workdir: str) -> int | None:
     """Seconds since the session's jsonl was last appended (None = no jsonl)."""
-    sid, wd = _session_opts(session)
-    if not sid or not wd:
+    if not sid or not workdir:
         return None
     try:
-        return max(0, int(time.time() - _jsonl_path(sid, wd).stat().st_mtime))
+        return max(0, int(time.time() - _jsonl_path(sid, workdir).stat().st_mtime))
     except OSError:
         return None
 
 
-def status_of(session: str, jsonl_age: int | None = None) -> str:
+def _jsonl_age_s(session: str) -> int | None:
+    return _jsonl_age(*_session_opts(session))
+
+
+def _classify(cmd: str, pane_text: str, jsonl_age: int | None) -> str:
     """'working' | 'waiting' | 'idle' | 'done' (claude exited) | 'unknown'
 
     Pane text is the primary classifier, but it under-reports "working": long
@@ -134,17 +168,21 @@ def status_of(session: str, jsonl_age: int | None = None) -> str:
     the session is mid-turn, so it upgrades idle/unknown -> working ('waiting'
     is kept — an approval prompt is pane-authoritative, and 'done' means the
     pane fell back to a shell, which no jsonl write can contradict)."""
-    r = _tmux("display-message", "-t", session, "-p", "#{pane_current_command}")
-    cmd = r.stdout.strip().lower()
-    if r.returncode == 0 and cmd in SHELLS:
+    if cmd in SHELLS:
         return "done"  # back at the shell -> claude exited, output kept
-    st = _detect_claude_status(capture(session, 40))
+    st = _detect_claude_status(pane_text)
     status = {"active": "working", "waiting": "waiting", "idle": "idle"}.get(st, "unknown")
-    if status in ("idle", "unknown"):
-        age = jsonl_age if jsonl_age is not None else _jsonl_age_s(session)
-        if age is not None and age < JSONL_FRESH_S:
-            return "working"
+    if status in ("idle", "unknown") and jsonl_age is not None and jsonl_age < JSONL_FRESH_S:
+        return "working"
     return status
+
+
+def status_of(session: str, jsonl_age: int | None = None) -> str:
+    r = _tmux("display-message", "-t", session, "-p", "#{pane_current_command}")
+    cmd = r.stdout.strip().lower() if r.returncode == 0 else ""
+    if jsonl_age is None:
+        jsonl_age = _jsonl_age_s(session)
+    return _classify(cmd, capture(session, 40), jsonl_age)
 
 
 def send_text(session: str, text: str) -> None:
@@ -219,6 +257,7 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
                        f'--remote-control {session} '
                        f'--append-system-prompt "$(cat {sf})" "$(cat {pf})"')
 
+    _invalidate_list_cache()  # the new worker must show up on the next poll
     return {"session": session, "title": title, "workdir": workdir,
             "claude_session_id": sid}
 
@@ -233,18 +272,21 @@ def kill(session: str) -> None:
         (SESSIONS_DIR / sid / ".done").touch()
     _tmux("kill-session", "-t", session)
     (PROMPT_DIR / f"{session}.md").unlink(missing_ok=True)
+    _invalidate_list_cache()
 
 
 _WEB_URL_CACHE: dict[str, str] = {}  # session -> claude.ai URL (stable once found)
 
 
-def _web_url(session: str) -> str | None:
+def _web_url(session: str, sid: str | None = None, wd: str | None = None) -> str | None:
     """claude.ai/code URL for a worker, once its remote-control bridge connects.
     The bridge id (bridgeSessionId: cse_<token>) lands in the session's jsonl,
-    whose path we know because spawn() pre-assigned --session-id (@hq_sid)."""
+    whose path we know because spawn() pre-assigned --session-id (@hq_sid).
+    Pass sid/wd when already known to skip the tmux option lookups."""
     if session in _WEB_URL_CACHE:
         return _WEB_URL_CACHE[session]
-    sid, wd = _session_opts(session)
+    if sid is None or wd is None:
+        sid, wd = _session_opts(session)
     if not sid or not wd:
         return None
     f = _jsonl_path(sid, wd)
@@ -265,32 +307,67 @@ def _web_url(session: str) -> str | None:
     return url
 
 
-def list_workers(tail_lines: int = 14) -> list[dict]:
+# list_workers is the polling hot path (browser extensions + dashboards hit it
+# every few seconds, often several at once) while the tmux server processes
+# commands serially and can stall for seconds under heavy pane output. Two
+# defenses: batch the per-worker tmux round-trips down to ONE capture-pane each
+# (options come from _sessions_full, pane commands from _pane_cmds), and a
+# short TTL cache so concurrent pollers coalesce into one rebuild. On a tmux
+# stall mid-rebuild the last snapshot is served stale instead of erroring —
+# a slightly old list beats a 500.
+_LIST_TTL_S = 2.0
+_list_lock = threading.Lock()
+_list_cache: dict = {"t": 0.0, "tail_lines": None, "workers": None}
+
+
+def _list_workers_uncached(tail_lines: int) -> list[dict]:
+    cmds = _pane_cmds()
     out = []
-    for s in sorted((x for x in _sessions() if x["name"].startswith(PREFIX)),
+    for s in sorted((x for x in _sessions_full() if x["name"].startswith(PREFIX)),
                     key=lambda x: x["created"], reverse=True):
         name = s["name"]
-        title = _tmux("show-option", "-t", name, "-qv", "@hq_title").stdout.strip()
-        kind = _tmux("show-option", "-t", name, "-qv", "@hq_kind").stdout.strip()
-        sid, wd = _session_opts(name)
-        jsonl_age = _jsonl_age_s(name)
+        jsonl_age = _jsonl_age(s["sid"], s["workdir"])
+        try:
+            pane = capture(name, max(40, tail_lines))
+            status = _classify(cmds.get(name, "").strip().lower(), pane, jsonl_age)
+            tail = "\n".join(pane.splitlines()[-tail_lines:]).rstrip()
+        except subprocess.TimeoutExpired:
+            status, tail = "unknown", ""  # one stuck pane must not 500 the list
         out.append({
             "session": name,
-            "title": title or name,
-            "kind": kind or "task",
-            "status": status_of(name, jsonl_age),
+            "title": s["title"] or name,
+            "kind": s["kind"] or "task",
+            "status": status,
             "attached": s["attached"],
             "age_s": int(time.time()) - s["created"],
-            "tail": capture(name, tail_lines).rstrip(),
-            "web_url": _web_url(name),
+            "tail": tail,
+            "web_url": _web_url(name, s["sid"], s["workdir"]),
             # observability for clients (busy spinners etc.): jsonl_age_s =
             # seconds since the session's event log last grew — the ground
             # truth for "actually doing something right now"
             "jsonl_age_s": jsonl_age,
-            "claude_session_id": sid or None,
-            "workdir": wd or None,
+            "claude_session_id": s["sid"] or None,
+            "workdir": s["workdir"] or None,
         })
     return out
+
+
+def list_workers(tail_lines: int = 14) -> list[dict]:
+    with _list_lock:
+        c = _list_cache
+        fresh = time.time() - c["t"] < _LIST_TTL_S and c["tail_lines"] == tail_lines
+        if not fresh:
+            try:
+                c["workers"] = _list_workers_uncached(tail_lines)
+                c["t"], c["tail_lines"] = time.time(), tail_lines
+            except subprocess.TimeoutExpired:
+                if c["workers"] is None or c["tail_lines"] != tail_lines:
+                    raise  # nothing usable to fall back to
+        return c["workers"]
+
+
+def _invalidate_list_cache() -> None:
+    _list_cache["t"] = 0.0
 
 
 def resume_registered() -> list[str]:
@@ -389,9 +466,7 @@ def registry_gc() -> list[str]:
 
 def list_others() -> list[dict]:
     """Read-only view of non-PREFIX tmux sessions (never touched)."""
-    out = []
-    for s in (x for x in _sessions() if not x["name"].startswith(PREFIX)):
-        r = _tmux("display-message", "-t", s["name"], "-p", "#{pane_current_command}")
-        out.append({"session": s["name"], "attached": s["attached"],
-                    "command": r.stdout.strip()})
-    return out
+    cmds = _pane_cmds()
+    return [{"session": s["name"], "attached": s["attached"],
+             "command": cmds.get(s["name"], "")}
+            for s in _sessions() if not s["name"].startswith(PREFIX)]
