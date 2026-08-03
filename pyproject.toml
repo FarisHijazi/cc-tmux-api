@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Local daemon that spawns, lists, and kills unattended Claude Code workers in tmux (with reboot revival)"
 readme = "README.md"
 authors = [
-    { name = "Faris Hijazi" }
+    { name = "Faris Hijazi", email = "theefaris@gmail.com" }
 ]
 requires-python = ">=3.12"
 dependencies = [
