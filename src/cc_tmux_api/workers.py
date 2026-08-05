@@ -8,7 +8,9 @@ Design (deliberately minimal):
   command is typed into it, so when claude exits the pane (and its output)
   survives for review instead of the session dying.
 - Sessions without the PREFIX are a disjoint namespace and are never touched;
-  they only appear read-only in list_others().
+  they only appear read-only in list_others(). Ownership additionally honours
+  the @hq_owner stamp (see _mine), so two instances with NESTED prefixes
+  (e.g. "hq-" and "hq-work-b-") stay disjoint too.
 - Send mechanics per Tmux-Orchestrator's send-claude-message.sh:
   literal text, 0.5s for the UI to register, then Enter.
 - State classification: vendor_amux._detect_claude_status (see that file),
@@ -88,14 +90,27 @@ def _tmux(*args: str, timeout: int = 10) -> subprocess.CompletedProcess:
     return subprocess.run(["tmux", *args], capture_output=True, text=True, timeout=timeout)
 
 
+def _mine(name: str, owner: str) -> bool:
+    """Ownership predicate. A session is ours iff its name carries our PREFIX
+    and, when it is stamped with an owner prefix (@hq_owner, set at spawn and
+    revive), that stamp is exactly ours. The stamp disambiguates NESTED
+    prefixes — two instances on "hq-" and "hq-work-b-": plain startswith would
+    make the shorter-prefix instance claim (list, reap, kill) the longer one's
+    sessions. Unstamped sessions (spawned before the stamp existed) fall back
+    to plain startswith, so an upgrade never orphans live workers."""
+    return name.startswith(PREFIX) and owner in ("", PREFIX)
+
+
 def _sessions() -> list[dict]:
-    r = _tmux("list-sessions", "-F", "#{session_name}\t#{session_created}\t#{session_attached}")
+    r = _tmux("list-sessions",
+              "-F", "#{session_name}\t#{session_created}\t#{session_attached}\t#{@hq_owner}")
     if r.returncode != 0:  # no tmux server running
         return []
     out = []
     for line in r.stdout.splitlines():
-        name, created, attached = line.split("\t")
-        out.append({"name": name, "created": int(created), "attached": attached == "1"})
+        name, created, attached, owner = line.split("\t")
+        out.append({"name": name, "created": int(created), "attached": attached == "1",
+                    "owner": owner})
     return out
 
 
@@ -106,14 +121,15 @@ def _sessions_full() -> list[dict]:
     contain a tab (it comes from user input)."""
     r = _tmux("list-sessions", "-F",
               "#{session_name}\t#{session_created}\t#{session_attached}"
-              "\t#{@hq_kind}\t#{@hq_sid}\t#{@hq_workdir}\t#{@hq_title}")
+              "\t#{@hq_kind}\t#{@hq_sid}\t#{@hq_workdir}\t#{@hq_owner}\t#{@hq_title}")
     if r.returncode != 0:  # no tmux server running
         return []
     out = []
     for line in r.stdout.splitlines():
-        name, created, attached, kind, sid, wd, title = line.split("\t", 6)
+        name, created, attached, kind, sid, wd, owner, title = line.split("\t", 7)
         out.append({"name": name, "created": int(created), "attached": attached == "1",
-                    "kind": kind, "sid": sid, "workdir": wd, "title": title})
+                    "kind": kind, "sid": sid, "workdir": wd, "owner": owner,
+                    "title": title})
     return out
 
 
@@ -244,6 +260,7 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
     _tmux("set-option", "-t", session, "@hq_sid", sid)
     _tmux("set-option", "-t", session, "@hq_workdir", workdir)
     _tmux("set-option", "-t", session, "@hq_kind", kind)
+    _tmux("set-option", "-t", session, "@hq_owner", PREFIX)
     _tmux("set-option", "-t", session, "status-style", STATUS_STYLE)
     # shell-first: type the claude command into the shell so the pane survives
     # claude's exit; prompts via file to dodge quoting. --disallowedTools +
@@ -263,8 +280,10 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
 
 
 def kill(session: str) -> None:
-    if not session.startswith(PREFIX):
-        raise ValueError(f"refusing to kill a non-{PREFIX} session")
+    owner = _tmux("show-option", "-t", session, "-qv", "@hq_owner").stdout.strip()
+    if not _mine(session, owner):
+        raise ValueError(f"refusing to kill a session not owned by this "
+                         f"instance (prefix {PREFIX})")
     # a human/API kill is a deliberate "this is finished" — tombstone the
     # registry entry so the session is never revived after a reboot
     sid, _ = _session_opts(session)
@@ -323,7 +342,7 @@ _list_cache: dict = {"t": 0.0, "tail_lines": None, "workers": None}
 def _list_workers_uncached(tail_lines: int) -> list[dict]:
     cmds = _pane_cmds()
     out = []
-    for s in sorted((x for x in _sessions_full() if x["name"].startswith(PREFIX)),
+    for s in sorted((x for x in _sessions_full() if _mine(x["name"], x["owner"])),
                     key=lambda x: x["created"], reverse=True):
         name = s["name"]
         jsonl_age = _jsonl_age(s["sid"], s["workdir"])
@@ -407,6 +426,7 @@ def resume_registered() -> list[str]:
         _tmux("set-option", "-t", session, "@hq_sid", sid)
         _tmux("set-option", "-t", session, "@hq_workdir", wd)
         _tmux("set-option", "-t", session, "@hq_kind", meta.get("kind", "task"))
+        _tmux("set-option", "-t", session, "@hq_owner", PREFIX)
         _tmux("set-option", "-t", session, "status-style", STATUS_STYLE)
         # /tmp is wiped on reboot — recreate the shared headless system prompt
         PROMPT_DIR.mkdir(parents=True, exist_ok=True)
@@ -437,7 +457,7 @@ def reap_stale(kind: str, max_age_hours: float) -> list[str]:
     reaped = []
     for s in _sessions():
         name = s["name"]
-        if not name.startswith(PREFIX) or s["created"] >= cutoff:
+        if not _mine(name, s["owner"]) or s["created"] >= cutoff:
             continue
         k = _tmux("show-option", "-t", name, "-qv", "@hq_kind").stdout.strip() or "task"
         if k == kind:
@@ -465,8 +485,9 @@ def registry_gc() -> list[str]:
 
 
 def list_others() -> list[dict]:
-    """Read-only view of non-PREFIX tmux sessions (never touched)."""
+    """Read-only view of tmux sessions this instance does not own (never
+    touched) — including another instance's workers under a nested prefix."""
     cmds = _pane_cmds()
     return [{"session": s["name"], "attached": s["attached"],
              "command": cmds.get(s["name"], "")}
-            for s in _sessions() if not s["name"].startswith(PREFIX)]
+            for s in _sessions() if not _mine(s["name"], s["owner"])]
