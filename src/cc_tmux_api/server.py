@@ -1,13 +1,20 @@
 """
 cc-tmux-api — a tiny local daemon that spawns, lists, and kills unattended
-Claude Code workers in tmux sessions.
+Claude Code workers in tmux sessions, and optionally schedules them.
 
-Three verbs over HTTP (the whole contract):
-  GET  /api/workers                  -> {"workers": [...], "others": [...]}
+The whole HTTP contract:
+  GET  /api/workers                  -> {"workers": [...], "others": [...], "routines": [...]}
   POST /api/workers/action           {"action": "spawn", "title", "prompt", "workdir"?}
                                      {"action": "send",  "session", "text"}
                                      {"action": "kill",  "session"}
-GET / serves a minimal status page; #w-<session> anchors deep-link to a worker.
+  POST /api/routines/action          {"action": "run"|"toggle", "name", "enabled"?}
+  POST /api/oneshot                  {"prompt", "timeout"?} -> {"ok", "output"}
+GET / serves the workers page; #w-<session> anchors deep-link to a worker.
+
+Embedding (an app on top — e.g. a mission-control that adds its own panels):
+    from cc_tmux_api.server import create_app
+    app = create_app()          # full API + UI
+    app.include_router(my_router)   # layer your domain routes over it
 
 SECURITY: there is NO auth. The server binds 127.0.0.1 only — never expose it
 (no CORS, no reverse proxy): anyone who can POST here can run permission-
@@ -16,21 +23,29 @@ skipping Claude sessions on your machine.
 Run: uvx git+https://github.com/FarisHijazi/cc-tmux-api
 Env: BCE_WORKSPACE_DIR (registry base, default ~/.basecamp-enhancer),
      CC_TMUX_PORT (default 8377), CC_TMUX_PREFIX (default "hq-"),
-     CC_TMUX_WORKDIR (default workdir for spawns, default $HOME).
+     CC_TMUX_WORKDIR (default workdir for spawns, default $HOME),
+     CC_TMUX_ROUTINES_DIR (routines *.md dir — unset = scheduling dormant),
+     CC_TMUX_ROUTINE_REAP_HOURS (kill stale routine workers, default 12).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import workers
+from . import routines, workers
+
+STATIC = Path(__file__).resolve().parent / "static"
+ROUTINE_REAP_HOURS = float(os.environ.get("CC_TMUX_ROUTINE_REAP_HOURS", "12"))
 
 
 @asynccontextmanager
@@ -47,12 +62,25 @@ async def _lifespan(app: FastAPI):
         except Exception as e:
             print(f"revive error: {e}", file=sys.stderr, flush=True)
 
-    task = asyncio.get_event_loop().create_task(revive())
+    async def scheduler():
+        # spawn due routines + reap stale routine workers, every 60s
+        while True:
+            try:
+                for name in await asyncio.to_thread(routines.tick):
+                    print(f"routine spawned: {name}", flush=True)
+                for name in await asyncio.to_thread(
+                        workers.reap_stale, "routine", ROUTINE_REAP_HOURS):
+                    print(f"reaped stale routine worker: {name}", flush=True)
+            except Exception as e:
+                print(f"routine tick error: {e}", file=sys.stderr, flush=True)
+            await asyncio.sleep(60)
+
+    tasks = [asyncio.get_event_loop().create_task(revive())]
+    if routines.enabled():
+        tasks.append(asyncio.get_event_loop().create_task(scheduler()))
     yield
-    task.cancel()
-
-
-app = FastAPI(title="cc-tmux-api", lifespan=_lifespan)
+    for t in tasks:
+        t.cancel()
 
 
 class WorkerAction(BaseModel):
@@ -64,75 +92,75 @@ class WorkerAction(BaseModel):
     text: str | None = None
 
 
-@app.get("/api/workers")
-def workers_list() -> dict:
-    return {"workers": workers.list_workers(), "others": workers.list_others()}
+class RoutineAction(BaseModel):
+    action: str  # run | toggle
+    name: str
+    enabled: bool | None = None
 
 
-@app.post("/api/workers/action")
-def workers_action(req: WorkerAction) -> dict:
-    if req.action == "spawn":
-        if not (req.title and req.prompt):
-            return {"ok": False, "output": "title and prompt required"}
-        info = workers.spawn(req.title.strip(), req.prompt, req.workdir or None)
-        return {"ok": True, **info}
-    if req.action == "send":
-        if not (req.session and req.text):
-            return {"ok": False, "output": "session and text required"}
-        workers.send_text(req.session, req.text)
-        return {"ok": True}
-    if req.action == "kill":
+class Oneshot(BaseModel):
+    prompt: str
+    timeout: int = 300
+
+
+def create_app() -> FastAPI:
+    app = FastAPI(title="cc-tmux-api", lifespan=_lifespan)
+
+    @app.get("/api/workers")
+    def workers_list() -> dict:
+        return {"workers": workers.list_workers(), "others": workers.list_others(),
+                "routines": routines.list_routines()}
+
+    @app.post("/api/workers/action")
+    def workers_action(req: WorkerAction) -> dict:
+        if req.action == "spawn":
+            if not (req.title and req.prompt):
+                return {"ok": False, "output": "title and prompt required"}
+            info = workers.spawn(req.title.strip(), req.prompt, req.workdir or None)
+            return {"ok": True, **info}
+        if req.action == "send":
+            if not (req.session and req.text):
+                return {"ok": False, "output": "session and text required"}
+            workers.send_text(req.session, req.text)
+            return {"ok": True}
+        if req.action == "kill":
+            try:
+                workers.kill(req.session or "")
+            except ValueError as e:
+                return {"ok": False, "output": str(e)}
+            return {"ok": True}
+        return {"ok": False, "output": f"unknown action {req.action}"}
+
+    @app.post("/api/routines/action")
+    def routines_action(req: RoutineAction) -> dict:
         try:
-            workers.kill(req.session or "")
-        except ValueError as e:
+            if req.action == "run":
+                return {"ok": True, **routines.run_now(req.name)}
+            if req.action == "toggle":
+                routines.set_enabled(req.name, bool(req.enabled))
+                return {"ok": True}
+        except (ValueError, OSError) as e:
             return {"ok": False, "output": str(e)}
-        return {"ok": True}
-    return {"ok": False, "output": f"unknown action {req.action}"}
+        return {"ok": False, "output": f"unknown action {req.action}"}
+
+    @app.post("/api/oneshot")
+    def oneshot(req: Oneshot) -> dict:
+        try:
+            r = workers.oneshot(req.prompt, req.timeout)
+        except subprocess.TimeoutExpired:
+            return {"ok": False, "output": f"timed out after {req.timeout}s"}
+        return {"ok": r.returncode == 0,
+                "output": r.stdout.strip() or r.stderr.strip()}
+
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    app.mount("/cc-static", StaticFiles(directory=STATIC), name="cc-static")
+    return app
 
 
-# Minimal status page. Worker cards carry id="w-<session>" so clients can
-# deep-link a specific worker (…/#w-<session>): the hash scrolls to and
-# flashes the card. Polls every 5s; no build step, no assets.
-_PAGE = """<!doctype html><meta charset="utf-8"><title>cc-tmux-api</title>
-<style>
- body{font:14px/1.5 -apple-system,system-ui,sans-serif;max-width:780px;margin:24px auto;padding:0 12px;background:#111;color:#ddd}
- h1{font-size:18px} .w{border:1px solid #333;border-radius:10px;padding:10px 14px;margin:10px 0;background:#1a1a1a}
- .w.flash{outline:2px solid #e8833a} .hd{display:flex;gap:10px;align-items:baseline}
- .st{font-size:12px;padding:1px 8px;border-radius:9px;background:#333}
- .st[data-s=working]{background:#2f6f3f}.st[data-s=waiting]{background:#8a6d1a}.st[data-s=done]{background:#555}
- pre{white-space:pre-wrap;font-size:11px;color:#9a9a9a;max-height:130px;overflow:auto;background:#141414;padding:8px;border-radius:6px}
- a{color:#7ab7ff} .meta{font-size:12px;color:#888} button{background:#3a2222;color:#e99;border:1px solid #633;border-radius:6px;cursor:pointer}
-</style>
-<h1>cc-tmux-api — workers</h1><div id="list">loading…</div>
-<script>
-async function tick(){
-  const d = await (await fetch('/api/workers')).json();
-  const el = document.getElementById('list');
-  el.innerHTML = d.workers.length ? '' : '<p class="meta">no workers</p>';
-  for (const w of d.workers){
-    const c = document.createElement('div'); c.className='w'; c.id='w-'+w.session;
-    c.innerHTML = `<div class="hd"><b>${w.title}</b><span class="st" data-s="${w.status}">${w.status}</span>`+
-      `<span class="meta">${w.session}</span>`+
-      (w.web_url?` <a href="${w.web_url}" target="_blank">claude.ai ↗</a>`:'')+
-      ` <button data-k="${w.session}">kill</button></div><pre>${w.tail.replace(/</g,'&lt;')}</pre>`;
-    el.appendChild(c);
-  }
-  el.querySelectorAll('button[data-k]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('kill '+b.dataset.k+'?'))return;
-    await fetch('/api/workers/action',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({action:'kill',session:b.dataset.k})}); tick();
-  });
-  if(location.hash.startsWith('#w-')){const t=document.getElementById(location.hash.slice(1));
-    if(t&&!t.dataset.flashed){t.dataset.flashed=1;t.scrollIntoView({block:'center'});t.classList.add('flash');
-      setTimeout(()=>t.classList.remove('flash'),2500);}}
-}
-tick(); setInterval(tick, 5000);
-</script>"""
-
-
-@app.get("/")
-def index() -> HTMLResponse:
-    return HTMLResponse(_PAGE, headers={"Cache-Control": "no-cache"})
+app = create_app()  # standalone: `uvicorn cc_tmux_api.server:app` / main()
 
 
 def main() -> None:

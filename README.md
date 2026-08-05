@@ -1,12 +1,14 @@
 # cc-tmux-api
 
-A tiny local HTTP daemon that **spawns, lists, and kills unattended
+A tiny local HTTP daemon that **spawns, lists, kills, and schedules unattended
 [Claude Code](https://code.claude.com) workers inside tmux sessions** — with
 status detection, claude.ai remote-control links, and revival after reboot.
 
 Built as the backend for the Basecamp Enhancer extension's Claude Code
 launcher, but generic: anything that can POST JSON to localhost can spin off
-workers.
+workers. Deliberately stateless and small — a REST wrapper around
+tmux-wrapping-claude plus a scheduler, nothing more. Domain logic (approval
+queues, work orchestration) belongs in apps **on top** (see Embedding).
 
 ## Run
 
@@ -26,10 +28,12 @@ control by default: inside any Claude Code session run `/config` and set
 ## API (the whole contract)
 
 ```text
-GET  /api/workers                  -> {"workers": [...], "others": [...]}
+GET  /api/workers                  -> {"workers": [...], "others": [...], "routines": [...]}
 POST /api/workers/action           {"action": "spawn", "title": "...", "prompt": "...", "workdir": "..."?}
                                    {"action": "send",  "session": "...", "text": "..."}
                                    {"action": "kill",  "session": "..."}
+POST /api/routines/action          {"action": "run" | "toggle", "name": "...", "enabled": bool?}
+POST /api/oneshot                  {"prompt": "...", "timeout": 300?} -> {"ok", "output"}
 ```
 
 Each worker in the list carries: `session` (tmux name), `title`, `status`
@@ -61,6 +65,42 @@ library's `reap_stale(kind, max_age_hours)`), `claude_session_id`, `workdir`,
   `continue` nudge. Workers tombstone themselves with a `.done` file when
   truly finished (kill does it too); tombstones are GC'd after 14 days.
 
+## Routines (scheduled workers)
+
+Set `CC_TMUX_ROUTINES_DIR` to a directory of markdown files and the server
+grows a scheduler (unset = the feature is dormant). One routine = one `.md`
+file — frontmatter is the schedule, the body is the worker prompt:
+
+```markdown
+---
+title: Nightly triage
+every: daily@07:00          # or: 30m / 2h
+days: sun,mon,tue,wed,thu   # optional
+enabled: true
+workdir: /path/for/worker   # optional
+---
+<prompt given to the spawned worker>
+```
+
+A 60s tick spawns whatever is due (`kind: routine`), skips a routine while its
+previous worker is still alive, and reaps routine workers older than
+`CC_TMUX_ROUTINE_REAP_HOURS`. The files are the source of truth — the UI
+toggle rewrites the `enabled:` line; the only state is last-run per routine in
+`<dir>/.state.json`.
+
+## Embedding (build your app on top)
+
+```python
+from cc_tmux_api.server import create_app
+
+app = create_app()               # full API + workers page at /
+app.include_router(my_router)    # layer your domain routes/pages over it
+```
+
+One process, one port: your app gets workers, routines, and the UI for free
+and stays free of tmux/claude plumbing. `cc_tmux_api.workers.oneshot(prompt)`
+runs a headless one-shot (`claude -p`) when you need output, not a session.
+
 ## Configuration (env vars)
 
 | Var | Default | Meaning |
@@ -69,6 +109,8 @@ library's `reap_stale(kind, max_age_hours)`), `claude_session_id`, `workdir`,
 | `CC_TMUX_PORT` | `8377` | HTTP port (always bound to 127.0.0.1) |
 | `CC_TMUX_PREFIX` | `hq-` | tmux session-name prefix that marks a worker |
 | `CC_TMUX_WORKDIR` | `$HOME` | Default working directory for spawned workers |
+| `CC_TMUX_ROUTINES_DIR` | unset | Directory of routine `.md` files; unset disables scheduling |
+| `CC_TMUX_ROUTINE_REAP_HOURS` | `12` | Kill routine-kind workers older than this |
 
 ## Security
 

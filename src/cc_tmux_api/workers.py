@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -206,6 +207,14 @@ def send_text(session: str, text: str) -> None:
     _tmux("send-keys", "-t", session, "-l", "--", text)
     time.sleep(0.5)
     _tmux("send-keys", "-t", session, "Enter")
+
+
+def oneshot(prompt: str, timeout: int = 300) -> subprocess.CompletedProcess:
+    """Run a prompt headlessly (`claude -p`) and return the completed process —
+    the ephemeral sibling of spawn(): no tmux, no registry, output = stdout."""
+    claude = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+    return subprocess.run([claude, "-p", prompt],
+                          capture_output=True, text=True, timeout=timeout)
 
 
 def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task") -> dict:

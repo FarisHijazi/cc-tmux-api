@@ -1,7 +1,7 @@
 [project]
 name = "cc-tmux-api"
-version = "0.2.1"
-description = "Local daemon that spawns, lists, and kills unattended Claude Code workers in tmux (with reboot revival)"
+version = "0.3.0"
+description = "Local daemon that spawns, lists, kills, and schedules unattended Claude Code workers in tmux (with reboot revival)"
 readme = "README.md"
 authors = [
     { name = "Faris Hijazi", email = "theefaris@gmail.com" }
@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110",
+    "pyyaml>=6.0",
     "uvicorn>=0.29",
 ]
 
