@@ -83,8 +83,9 @@ workdir: /path/for/worker   # optional
 ```
 
 A 60s tick spawns whatever is due (`kind: routine`), skips a routine while its
-previous worker is still alive, and reaps routine workers older than
-`CC_TMUX_ROUTINE_REAP_HOURS`. The files are the source of truth — the UI
+previous worker is still alive (claude still in the pane — a worker that has
+dropped back to a shell counts as finished and is cleared before the respawn),
+and reaps routine workers older than `CC_TMUX_ROUTINE_REAP_HOURS`. The files are the source of truth — the UI
 toggle rewrites the `enabled:` line; the only state is last-run per routine in
 `<dir>/.state.json`.
 
