@@ -271,8 +271,12 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
     _tmux("set-option", "-t", session, "@hq_kind", kind)
     _tmux("set-option", "-t", session, "@hq_owner", PREFIX)
     _tmux("set-option", "-t", session, "status-style", STATUS_STYLE)
-    # shell-first: type the claude command into the shell so the pane survives
-    # claude's exit; prompts via file to dodge quoting. --disallowedTools +
+    # shell-first so prompts can come from files (dodges quoting), but the
+    # command ends in `; exit`: when claude exits the shell exits and tmux
+    # closes the session. A lingering shell pane read as a live worker to the
+    # routines overlap guard (2026-09-18) and piled up in the listing; the
+    # conversation itself is durable in the jsonl (--session-id below), so
+    # nothing is lost. --disallowedTools +
     # --append-system-prompt keep the unattended worker from ever blocking on a
     # prompt. --remote-control (named after the tmux session, and NEVER bare —
     # its optional [name] would swallow the next token) lets the session be
@@ -281,7 +285,7 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
                        f'--disallowedTools {BLOCKED_TOOLS} '
                        f'--session-id {sid} '
                        f'--remote-control {session} '
-                       f'--append-system-prompt "$(cat {sf})" "$(cat {pf})"')
+                       f'--append-system-prompt "$(cat {sf})" "$(cat {pf})"; exit')
 
     _invalidate_list_cache()  # the new worker must show up on the next poll
     return {"session": session, "title": title, "workdir": workdir,

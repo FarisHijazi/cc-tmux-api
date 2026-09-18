@@ -49,8 +49,9 @@ library's `reap_stale(kind, max_age_hours)`), `claude_session_id`, `workdir`,
 
 - **tmux is the live registry** — a worker is any session named `hq-*`
   (configurable). Spawn is *shell-first*: the session starts as a plain shell
-  and the `claude` command is typed in, so when claude exits the pane and its
-  output survive for review.
+  and the `claude` command is typed in (prompts come from files, no quoting),
+  ending in `; exit` so the session closes itself when claude exits. The
+  conversation stays reviewable via `claude --resume <claude_session_id>`.
 - **Unattended by construction** — workers run with
   `--dangerously-skip-permissions`, the question tool disabled, and a system
   prompt forbidding "shall I proceed?" stalls.
