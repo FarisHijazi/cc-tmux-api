@@ -14,6 +14,13 @@ The persistent ftower aggregator is published at the requested hostname; see
 [the ftower deployment log](docs/devlog/claude_20261008-ftower-deployment.md) for
 runtime ownership and verification. Application certificate handling remains
 outside this design. Public origins can be configured without an app token.
+The public hostname now requires Traefik Basic Auth on every path. Preserve that
+proxy gate; private peers remain token-free. Password material belongs outside
+this repository. See [the auth/discovery follow-up](docs/devlog/claude_20261008-auth-and-discovery.md).
+Sahalat runs 0.4.4: shell-labelled panes require a unique ancestry-safe Claude
+with its own foreground process marker, never just a foreground parent shell.
+The old Sahalat session lacks current UUID evidence; preserve its terminal
+access without guessing a conversation identity from stale events or cwd.
 The public deployment passed actual session-detail and mobile/desktop browser
 checks plus a native-verified nine-action remote question batch; physical iPhone
 push delivery remains unverified. Preserve that distinction in future reports.

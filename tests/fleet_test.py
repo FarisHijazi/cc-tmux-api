@@ -149,6 +149,45 @@ def test_process_parent_uuid_not_nested_child():
     assert probe.target_process(pane, {100: shell, 101: parent}) is None
 
 
+@pytest.mark.parametrize('state,visible', [
+    ('Sl+', True), ('R+', True), ('Sl', False),
+    ('T+', False), ('t+', False), ('Z+', False), ('X+', False),
+])
+def test_shell_label_discovery_requires_live_foreground_claude(monkeypatch, state, visible):
+    # A non-job-control shell and its child can both be foreground. tmux then
+    # reports bash even though the native Claude prompt is active.
+    output = (
+        '100 1 pts/1 Ss+ Thu Oct 8 09:00:00 2026 bash\n'
+        f'101 100 pts/1 {state} Thu Oct 8 09:00:01 2026 claude --session-id {SID}\n'
+    )
+    monkeypatch.setattr(probe, 'run', lambda args: subprocess.CompletedProcess(
+        args, 0, '100 bash\n101 2.1.294\n' if args[-1] == 'pid=,comm=' else output, ''))
+    pane = {'pane_pid': '100', 'pane_tty': '/dev/pts/1',
+            'pane_id': '%0', 'pane_current_command': 'bash'}
+    monkeypatch.setattr(probe, 'inventory', lambda: [pane])
+    monkeypatch.setattr(probe, 'inspect', lambda pane, proc: {
+        'pane': pane['pane_id'], 'claude_session_id': probe.argv_sid(proc)})
+    assert probe.discover() == ([{'pane': '%0', 'claude_session_id': SID}] if visible else [])
+
+
+@pytest.mark.parametrize('case', ['other_tty', 'unrelated', 'ambiguous', 'nested_foreground'])
+def test_shell_label_does_not_adopt_unsafe_claude(case):
+    pane = {'pane_pid': '100', 'pane_tty': '/dev/pts/1', 'pane_current_command': 'bash'}
+    shell = dict(pid=100, parent=1, tty='pts/1', state='Ss+', comm='bash', args='bash')
+    claude = dict(shell, pid=101, parent=100, comm='claude', state='Sl+')
+    procs = {100: shell, 101: claude}
+    if case == 'other_tty':
+        claude['tty'] = 'pts/2'
+    elif case == 'unrelated':
+        claude['parent'] = 99
+    elif case == 'ambiguous':
+        procs[102] = dict(claude, pid=102)
+    else:
+        claude['state'] = 'Sl'
+        procs[102] = dict(claude, pid=102, parent=101, state='Sl+')
+    assert probe.target_process(pane, procs) is None
+
+
 def test_menu_single_descriptions_and_signature():
     menu = probe.parse_menu(SINGLE)
     assert menu['question'] == 'Pick a colour?'

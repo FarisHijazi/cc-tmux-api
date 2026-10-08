@@ -8,9 +8,10 @@ node. Local and SSH probes remain available for hosts without an HQ peer.
 
 The current design replaces the old HQ with this application, embedded in the
 same process where domain routes are needed, rather than adding a permanent
-mobile daemon. The requested runtime has **no app pairing token**, including
-public HTTPS access through an external reverse proxy or tunnel. HQ serves HTTP
-on explicit interfaces; no Serve or Funnel is part of the plan.
+mobile daemon. The runtime has **no app pairing token**; the public homelab
+hostname is protected by Traefik Basic Auth. Private HQ peers still communicate
+without app tokens. HQ serves HTTP on explicit interfaces; no Serve or Funnel
+is part of the plan.
 See [the current handoff](docs/devlog/claude_20261008-federated-hq-lifecycle.md)
 for source/test evidence and limits. Domain logic belongs in apps **on top**.
 
@@ -36,7 +37,7 @@ HQ dashboard. Sessions groups existing Claude panes by host or directory, with
 search, attention filtering, conversation/terminal views, and guarded controls.
 Workers and Routines retain the unattended workflow described below;
 `#w-<session>` opens a worker card. Fleet links use `/#session=<encoded-id>`.
-This checkout is version 0.4.3; the upstream `uvx` command
+This checkout is version 0.4.4; the upstream `uvx` command
 above uses the published repository, not necessarily these uncommitted changes.
 
 For shareable `claude.ai/code/session_…` links per worker, enable remote
@@ -421,6 +422,9 @@ authentication in that mode; `/api/auth` returns
 `{required:false, authenticated:true}`. Host allowlisting, same-origin checks and
 JSON mutation requirements still apply. Public HTTPS termination is supplied by
 an external reverse proxy or tunnel; no Serve or Funnel is planned.
+The deployed homelab hostname additionally requires a Traefik Basic Auth login
+for every path; successful proxy authentication does not change `/api/auth`'s
+application-level response. Preserve the proxy gate when changing routing.
 Mobile push/PWA device delivery remains unverified; server push
 availability means configured, not delivered.
 

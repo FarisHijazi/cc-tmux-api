@@ -119,8 +119,6 @@ def is_claude(proc):
 
 
 def target_process(pane, procs):
-    if pane['pane_current_command'] in ('bash', 'zsh', 'fish', 'sh', 'dash', 'ksh'):
-        return None
     root = int(pane['pane_pid'])
     candidates = []
     for proc in procs.values():
@@ -141,6 +139,14 @@ def target_process(pane, procs):
     if len(candidates) != 1:
         return None
     result = dict(candidates[0])
+    if any(flag in result['state'] for flag in 'TtZXx'):
+        return None
+    # With job control disabled, bash and Claude share the foreground process
+    # group and tmux can report bash. Trust Claude's own ps foreground marker,
+    # never the shell's marker or mere descendant membership.
+    if pane['pane_current_command'] in ('bash', 'zsh', 'fish', 'sh', 'dash', 'ksh'):
+        if '+' not in result['state']:
+            return None
     # Any nested Claude invalidates event-only UUID inference: those children
     # inherit the same TMUX_PANE and can publish their own session IDs.
     result['nested'] = any(is_claude(p) and p['pid'] != result['pid'] and

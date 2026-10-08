@@ -1,5 +1,8 @@
 # Persistent homelab HQ deployment
 
+The [auth/discovery follow-up](claude_20261008-auth-and-discovery.md) supersedes
+the public no-login state and the zero-session Sahalat finding below.
+
 ## Plan and ownership
 
 The user requested moving the aggregation entry point to `ftower`, publishing
