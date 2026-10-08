@@ -3,12 +3,21 @@ import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { auditMenus } from './remote_menus.mjs';
+import { testOrigin, decodeRoute } from './federation_checks.mjs';
 
 const require = createRequire(join(process.env.MOBILE_BROWSER_ENV || '/private/tmp/cc-mobile-browser', 'package.json'));
 const { chromium, devices, expect } = require('@playwright/test');
-if (process.env.MOBILE_TOY_ACTIONS !== '1' || !process.env.MOBILE_KEY_FILE) throw new Error('Requires parent toy-action readiness and MOBILE_KEY_FILE');
-const origin = 'http://127.0.0.1:8389';
+if (process.env.MOBILE_TOY_ACTIONS !== '1' || process.env.MOBILE_READY !== '1') throw new Error('Requires parent readiness and explicit toy-action gate');
+const origin = testOrigin();
 const remote = process.env.MOBILE_REMOTE_TOY === '1';
+const freshBatchOnly = process.env.MOBILE_FRESH_BATCH_ONLY === '1';
+if (process.env.MOBILE_MENU_VARIANT === 'current-review' && (!freshBatchOnly || origin === 'http://127.0.0.1:8391')) {
+  throw new Error('Current-review retest requires one fresh batch through root, not the stopped relay');
+}
+if (freshBatchOnly && (!remote || process.env.MOBILE_MENU_TESTS !== '1' ||
+    ['MOBILE_RESUME_MENU', 'MOBILE_VERIFY_COMPLETED', 'MOBILE_CONTROLS_ONLY'].some(k => process.env[k] === '1'))) {
+  throw new Error('Fresh batch requires remote menu mode with no resume, verification-only, or control-only mode');
+}
 const target = remote ? 'cc-mobile-browser-toy-20261008:0.0' : 'cc-mobile-research-toy:0.0';
 const expected = remote
   ? ['cc-mobile-browser-toy-20261008', '%37', '/tmp/cc-mobile-browser-toy-c620be5c-5c58-4ad6-a039-97fe1673fa6f', 'claude', '2265987']
@@ -18,10 +27,19 @@ const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 const tmuxRead = args => remote
   ? execFileSync('ssh', ['work-a', ['tmux', ...args].map(quote).join(' ')], { encoding: 'utf8' })
   : execFileSync('tmux', args, { encoding: 'utf8' });
+let routedIdentity;
 function verifyNative() {
   const actual = tmuxRead(['display-message', '-p', '-t', target,
     '#{session_name}|#{pane_id}|#{pane_current_path}|#{pane_current_command}|#{pane_pid}']).trim().split('|');
   expect(actual, 'Reserved toy native identity').toEqual(expected);
+  if (routedIdentity) {
+    expect(tmuxRead(['display-message', '-p', '#{pid}|#{start_time}|#{socket_path}']).trim(), 'Native tmux generation').toBe(routedIdentity[0]);
+    expect(tmuxRead(['display-message', '-p', '-t', target, '#{session_created}']).trim(), 'Native session generation').toBe(String(routedIdentity[3]));
+    const args = ['ps', '-p', String(routedIdentity[4]), '-o', 'lstart='];
+    const birth = remote ? execFileSync('ssh', ['work-a', args.map(quote).join(' ')], { encoding: 'utf8' })
+      : execFileSync(args[0], args.slice(1), { encoding: 'utf8' });
+    expect(birth.trim().replace(/\s+/g, ' '), 'Native Claude process birth').toBe(routedIdentity[5]);
+  }
 }
 function nativeTail() {
   verifyNative();
@@ -34,24 +52,39 @@ let browser;
 let key = '';
 try {
   verifyNative();
-  key = (await readFile(process.env.MOBILE_KEY_FILE, 'utf8')).trim();
   browser = await chromium.launch({ channel: 'chrome' });
   const context = await browser.newContext({ ...devices['iPhone 13'], baseURL: origin });
-  const login = await context.request.post('/api/auth/login', { data: { token: key }, headers: { Origin: origin } });
-  expect(login.ok(), 'Pairing succeeds').toBe(true);
+  const authResponse = await context.request.get('/api/auth');
+  expect(authResponse.ok()).toBe(true);
+  const auth = await authResponse.json();
+  expect(typeof auth.required).toBe('boolean');
+  if (process.env.MOBILE_EXPECT_NO_PAIRING === '1') expect(auth.required).toBe(false);
+  if (auth.required) {
+    if (!process.env.MOBILE_KEY_FILE) throw new Error('Pairing required but no key file supplied');
+    key = (await readFile(process.env.MOBILE_KEY_FILE, 'utf8')).trim();
+    const login = await context.request.post('/api/auth/login', { data: { token: key }, headers: { Origin: origin } });
+    expect(login.ok(), 'Pairing succeeds').toBe(true);
+  }
+  report.checks.push({ name: 'auth discovery', status: 'passed', required: auth.required, loginSent: auth.required });
   const fleetResponse = await context.request.get('/api/sessions');
   expect(fleetResponse.ok()).toBe(true);
   const fleet = await fleetResponse.json();
   report.identity = { host: expectedHost, session: expected[0], pane: expected[1], cwd: expected[2], pid: expected[4] };
-  const matches = fleet.sessions.filter(s => s.host === expectedHost && s.session === expected[0] && s.pane === expected[1] && s.workdir === expected[2]);
+  const matches = fleet.sessions.filter(s => s.session === expected[0] && s.pane === expected[1] && s.workdir === expected[2]);
   if (matches.length !== 1) {
     report.blocked = 'Reserved toy not uniquely discovered; no action sent';
     process.exitCode = 2;
   } else {
     const toy = matches[0];
-    const [hostId, identity] = JSON.parse(Buffer.from(toy.id, 'base64url').toString());
-    expect(hostId).toBe(expectedHost); expect(identity[1]).toBe(expected[1]);
+    const { hops, identity, ownerId } = decodeRoute(toy.id);
+    expect(ownerId).toBe(toy.owner_session_id);
+    expect(hops).toContain(expectedHost);
+    expect(hops.length - 1).toBeGreaterThanOrEqual(Number(process.env.MOBILE_MIN_PEER_HOPS || 0));
+    report.route = { origin, hops, hostPath: toy.host_path, ownerNode: toy.owner_node_id, ownerSession: ownerId, originId: toy.origin_id };
+    expect(identity[1]).toBe(expected[1]);
     expect(String(identity[2])).toBe(expected[4]);
+    routedIdentity = identity;
+    verifyNative();
     const detailPath = `/api/sessions/${encodeURIComponent(toy.id)}`;
     const actionPath = `${detailPath}/action`;
     const detail = async () => {
@@ -66,6 +99,7 @@ try {
     if (process.env.MOBILE_RESUME_MENU !== '1') expect(initial.menu, 'Toy starts without an open menu').toBeFalsy();
     let staleRevision;
     let sent = 0;
+    let prompts = 0;
     await context.route('**/*', async route => {
       const request = route.request();
       const url = new URL(request.url());
@@ -73,6 +107,7 @@ try {
         if (url.origin !== origin || url.pathname !== actionPath || request.method() !== 'POST') return route.abort('blockedbyclient');
         verifyNative();
         const payload = request.postDataJSON();
+        if (freshBatchOnly && payload.action === 'send' && ++prompts > 1) return route.abort('blockedbyclient');
         const menuAction = remote && process.env.MOBILE_MENU_TESTS === '1' && ['select', 'type', 'submit', 'key'].includes(payload.action);
         if (payload.action !== 'send' && !menuAction && !(process.env.MOBILE_CONTROLS_ONLY === '1' && payload.action === 'key' && ['Left', 'Right'].includes(payload.key))) return route.abort('blockedbyclient');
         sent++;
@@ -87,7 +122,7 @@ try {
     const composer = page.getByRole('textbox', { name: 'Message this session' });
     await expect(page.locator('.detail .loading')).toHaveCount(0);
     await expect(page.locator('.detail-title h2')).toHaveText(toy.title || toy.session);
-    if (process.env.MOBILE_RESUME_MENU !== '1' && process.env.MOBILE_VERIFY_COMPLETED !== '1') {
+    if (process.env.MOBILE_RESUME_MENU !== '1' && process.env.MOBILE_VERIFY_COMPLETED !== '1' && process.env.MOBILE_MENU_VARIANT !== 'current-review') {
     const draft = 'Unsent owned toy browser draft';
     await composer.fill(draft);
     await page.reload();
@@ -184,6 +219,7 @@ try {
     await page.getByRole('tab', { name: 'Terminal', exact: true }).click();
     await page.screenshot({ path: join(evidence, 'toy-terminal.png'), scale: 'css' });
     report.requests = sent;
+    if (freshBatchOnly) expect(prompts, 'Exactly one fresh model batch prompt').toBe(1);
     report.pageErrors = pageErrors;
     expect(pageErrors).toEqual([]);
     await context.close();

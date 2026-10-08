@@ -43,6 +43,8 @@ try {
     let actionCount = 0;
     let failAction = false;
     let failDetail = false;
+    const completeReview = 'BROWSER_MENU_RESULT: old result\nReview your answers\nOld question\n→ Old choice\nReady to submit your answers?\nOlder output\nReview your answers\n\nWhich items?\n→ Map, Rope\n\nReady to submit your answers?\nTrailing output';
+    let reviewTail = completeReview;
     let messageText = 'Review ready.\n\n'.repeat(60) + '<script>window.injected = true</script>';
     const session = { id:'host/pane', host:'local', host_label:'Local', session:'research', pane:'%1', title:'Review the implementation', workdir:'/workspace/project', status:'idle', status_label:'Permission required', status_emoji:'🔐', lifecycle:'alive',alive:true,last_seen:Date.now()/1000,updated_at:Date.now()/1000, revision:'1', managed:false, command:'claude' };
     if (width === 390) { delete session.lifecycle; delete session.alive; }
@@ -82,7 +84,7 @@ try {
       } else if (url.pathname.startsWith('/api/sessions/')) {
         if (failDetail) return route.fulfill({status:503,json:{detail:'Host cannot be reached'}});
         const target = extraSessions.find(s => s.id === decodeURIComponent(url.pathname.slice('/api/sessions/'.length))) || session;
-        data = target === session && (session.lifecycle === undefined || session.lifecycle === 'alive') ? {...session, revision:String(revision), menu, tail:menu?.kind === 'review' ? 'Review your answers\n\nWhich items?\n→ Map, Rope\n\nReady to submit your answers?' : 'Ready for input',messages:[{role:'assistant',text:messageText}]} : {...target,revision:String(revision),tail:target.tail || '',messages:[]};
+        data = target === session && (session.lifecycle === undefined || session.lifecycle === 'alive') ? {...session, revision:String(revision), menu, tail:menu?.kind === 'review' ? reviewTail : 'Ready for input',messages:[{role:'assistant',text:messageText}]} : {...target,revision:String(revision),tail:target.tail || '',messages:[]};
       }
       else if (url.pathname === '/api/push/preferences') data = {muted:[]};
       else if (url.pathname === '/api/push') data = {available:false,public_key:'',reason:'Not configured'};
@@ -209,8 +211,27 @@ try {
     assert.equal(actions.at(-1).index,2,'Batch Continue must target the native Next navigation row');
     menu = {...menu,kind:'review',question:'Review your answers',options:[{index:0,label:'Submit answers',selected:false,description:''}]};
     await page.getByRole('button', {name:'Refresh session',exact:true}).click();
-    await page.getByRole('button', {name:'Submit answer',exact:true}).click();
+    await page.locator('.review-summary pre').waitFor();
+    assert.equal(await page.locator('.review-summary pre').textContent(),'Review your answers\n\nWhich items?\n→ Map, Rope\n\nReady to submit your answers?','Only the latest complete active review section may appear');
+    assert.equal(/BROWSER_MENU_RESULT|Old question|Old choice|Older output|Trailing output/.test(await page.locator('.review-summary').textContent()),false);
+    for (const unextractable of [
+      completeReview + '\nReview your answers\nIncomplete current section',
+      'Unrelated result\nReady to submit your answers?',
+      'prefix Review your answers\nUntrusted answer\nReady to submit your answers?',
+    ]) {
+      reviewTail = unextractable;
+      await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+      await page.locator('.review-summary').getByText('Current review is unavailable. Open the Terminal tab to check your answers before submitting.',{exact:true}).waitFor();
+      assert.equal(await page.locator('.review-summary pre').count(),0,'Unextractable reviews must not fall back to stale or unrelated terminal output');
+      await page.getByRole('tab',{name:'Terminal',exact:true}).click();
+      assert.equal(await page.locator('#session-panel > .terminal-output').textContent(),unextractable,'The existing Terminal tab must remain available for inspection');
+      await page.getByRole('tab',{name:'Conversation',exact:true}).click();
+    }
+    reviewTail = completeReview;
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    await page.locator('.review-summary pre').waitFor();
     assert.ok((await page.locator('.review-summary').textContent()).includes('Map, Rope'),'Native review answers must remain visible before final submission');
+    await page.getByRole('button', {name:'Submit answer',exact:true}).click();
     await page.waitForFunction(() => !document.querySelector('.question-card .primary').disabled);
     assert.equal(actions.at(-1).action,'submit');
     menu = {question:'Write a custom answer',multi_select:false,kind:'question',focused_index:0,options:[{index:0,label:'Default',selected:false,description:''},{index:1,label:'Type something else…',kind:'free_text',selected:false,description:''}]};

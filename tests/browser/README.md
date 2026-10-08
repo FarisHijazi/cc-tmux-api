@@ -38,7 +38,9 @@ Optional settings: `MOBILE_HEADED=1`, `MOBILE_UI_PATH`, `MOBILE_READY_SELECTOR`,
 interactions in [read_only_audit.mjs](read_only_audit.mjs): grouping, search,
 attention filtering, detail tabs, offline/online, dark mode, and composer bounds.
 Draft typing is allowed only when the reserved toy is discovered, and never sent.
-The target origin is restricted to `http://127.0.0.1:8389`.
+The allowed origins are the persistent HQ `http://100.115.53.98:8389`, the
+parent-owned ephemeral relay `http://127.0.0.1:8391`, and the historical local
+preview `http://127.0.0.1:8389`. The persistent HQ is now the default.
 Read-only smoke mode logs in via `/api/auth/login` only when required, checks `/api/sessions`,
 waits for the UI's successful sessions response, and captures 390×844 and
 1440×1000 views plus a shortened mobile viewport. UI API writes are blocked.
@@ -261,3 +263,122 @@ no pairing screen. Evidence:
 Actual screenshots: `iphone.png` and `desktop.png` in that directory. No toy
 requests or API action writes were sent. This was a focused no-pairing smoke run;
 the earlier full menu batch remains the interaction evidence.
+
+## Federation deployment preparation
+
+[federation_checks.mjs](federation_checks.mjs) extends the existing harness using
+the routed identity contract in [fleet.py](../../src/cc_tmux_api/fleet.py).
+These commands are prepared, not executed deployment evidence. Wait for parent
+readiness; parent owns starting the relay with its unique node ID and worker
+management disabled. This harness starts no servers and changes no networking.
+
+Read-only phone/desktop audit of persistent HQ, including every actual session:
+
+```sh
+MOBILE_READY=1 MOBILE_EXPECT_NO_PAIRING=1 MOBILE_ALL_DETAILS=1 MOBILE_AUDIT=1 \
+MOBILE_MIN_PEER_HOPS=1 MOBILE_BASE_URL=http://100.115.53.98:8389 \
+node tests/browser/mobile_e2e.mjs
+```
+
+After the parent starts the loopback relay, verify two peer hops, every detail,
+unchanged owner identities, and the same origin set as the root:
+
+```sh
+MOBILE_READY=1 MOBILE_EXPECT_NO_PAIRING=1 MOBILE_ALL_DETAILS=1 MOBILE_AUDIT=1 \
+MOBILE_MIN_PEER_HOPS=2 MOBILE_COMPARE_ROOT=http://100.115.53.98:8389 \
+MOBILE_BASE_URL=http://127.0.0.1:8391 node tests/browser/mobile_e2e.mjs
+```
+
+Only after the parent's explicit run signal, send ONE fresh batch through the
+relay to the existing owned remote toy. No second root batch is needed:
+
+```sh
+MOBILE_READY=1 MOBILE_TOY_ACTIONS=1 MOBILE_EXPECT_NO_PAIRING=1 \
+MOBILE_REMOTE_TOY=1 MOBILE_MENU_TESTS=1 MOBILE_FRESH_BATCH_ONLY=1 \
+MOBILE_MIN_PEER_HOPS=2 MOBILE_BASE_URL=http://127.0.0.1:8391 \
+node tests/browser/toy_actions.mjs
+```
+
+The runner verifies native session/pane/cwd/command/PID before every browser
+action, unwraps the routed ID to its owner identity, and allows POST only to
+that discovered toy's action endpoint. Fresh-batch mode blocks a second model
+prompt. Single/multi/custom answers and native result must pass; writes are
+never automatically retried. No key file is read when auth is not required.
+
+Transcript diagnosis corrected the earlier historical safe-mode descriptions:
+outer toy UUID `c620be5c-…` has no transcript file; the six-message transcript
+`a4ba347f-…` belongs to nested Claude PID 2292649 on a different tty. It must not
+be substituted for the outer session. Current detail audits record the backend's
+typed `transcript_status`; native result verification does not fabricate mapping.
+
+Preparation validation: JavaScript syntax checks, bounded route-decoding and
+origin allowlist checks, and closed readiness gates. No live deployment requests,
+Chrome launch, tmux input, or model batch was performed during preparation.
+
+## Persistent HQ and two-forwarder pass — 18:17 UTC
+
+After parent go-ahead, real clean Chrome contexts passed both 390×844 and
+1440×1000 audits. All 11 sessions were alive; eight arrived through HTTP peers.
+Root evidence: `/private/tmp/cc-mobile-browser/evidence/2026-10-08T18-14-49.171Z/`.
+Relay evidence: `/private/tmp/cc-mobile-browser/evidence/2026-10-08T18-15-29.311Z/`.
+Every detail preserved its owner identity. Relay/root origin sets matched;
+VM routes traversed two forwarders. Root screenshots show the clean four-host
+footer despite the API also exposing peer host records. Mac ansible returned
+19 mapped messages with `transcript_status=available` through both routes.
+
+Fresh relay batch: `/private/tmp/cc-mobile-browser/evidence/toy-2026-10-08T18-15-32.834Z/`.
+All nine actions returned HTTP 200 via `root → work-a → local`, owner
+`hq-work-a`. Native pane/PID, tmux generation, session creation and Claude
+birth were checked before input. Fresh native marker
+`BROWSER_MENU_RESULT_1791483338377` confirms Green, Map/Rope and
+“Oat biscuit, lightly salted”. No other pane received input; no local toy prompt.
+Zero page errors. `menu-review.png` still initially displays an older result
+from the terminal-tail summary; current answers exist but are not shown first.
+
+[controls_audit.mjs](controls_audit.mjs) verified all nine keyboard controls are
+enabled for each of 11 sessions at both widths without pressing them (22 checks).
+Evidence: `/private/tmp/cc-mobile-browser/evidence/controls-2026-10-08T18-17-06.849Z/`.
+Includes `iphone-footer.png`, `desktop-footer.png`, and phone/desktop screenshots
+of the 19-message ansible conversation. All contexts closed. Relay left running
+for the parent; local toy no longer has a browser-test dependency and may enter
+the parent's separately owned Alive → Ended test.
+
+## Final handoff and lifecycle transition
+
+Browser work is complete; no further tests or commits were run after handoff.
+The root and relay audits above each covered 390×844 and 1440×1000. The nine
+HTTP 200 actions were: prompt send, Green selection, Map toggle, Rope toggle,
+Continue, custom focus, custom insertion, custom confirmation, and Submit.
+The fresh native result marker and reports above are the authoritative evidence.
+
+Parent subsequently reported successful API/UI transition of only the owned
+local toy `%121`/PID 6697 to Ended: expected fleet is now 11 total, 10 alive,
+one ended. This lifecycle result is parent-reported, not an additional browser
+run by this worker. Ended UI correctly removes the composer rather than leaving
+a disabled textbox. Parent's continuation verifier was checking absent controls
+and HTTP 409 at handoff; those checks are not claimed complete here. The remote
+toy remained untouched by the parent. This worker left the relay running and
+all its Chrome contexts closed.
+
+## Pending narrow review-clipping retest
+
+Prepared only; wait for parent to serve the UI patch and give go-ahead.
+`MOBILE_MENU_VARIANT=current-review` selects Red, Map/Lamp, and “Pear slices”
+instead of the old batch answers. It skips the broad draft/reconnect audit.
+Before Submit it saves `menu-review.png`, `native-review-before-submit.txt`, and
+`review-card-before-submit.txt`, requires the native current answer block, and
+rejects any old `BROWSER_MENU_RESULT`, Green, Rope, or Oat biscuit in the review
+card. Then it submits and verifies the fresh native model marker and new answers.
+An assertion failure before Submit leaves the review open; no automatic resend.
+
+Use root directly; parent has stopped the relay. After readiness only:
+
+```sh
+MOBILE_READY=1 MOBILE_TOY_ACTIONS=1 MOBILE_EXPECT_NO_PAIRING=1 \
+MOBILE_REMOTE_TOY=1 MOBILE_MENU_TESTS=1 MOBILE_FRESH_BATCH_ONLY=1 \
+MOBILE_MENU_VARIANT=current-review MOBILE_MIN_PEER_HOPS=1 \
+MOBILE_BASE_URL=http://100.115.53.98:8389 node tests/browser/toy_actions.mjs
+```
+
+Preparation passed syntax and offline answer-configuration checks. No browser,
+app requests, native pane reads, or model input occurred during this preparation.

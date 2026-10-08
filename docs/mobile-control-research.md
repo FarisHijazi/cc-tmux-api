@@ -17,9 +17,11 @@ live questions. Workers and adopted interactive sessions retain distinct owners.
 Exact fields, history semantics and routing limits belong in the
 [README contracts](../README.md#mobile-api), not a second API description here.
 
-The intended deployment runs the same HQ everywhere and replaces the old HQ,
-embedding domain routes in one process. No permanent second mobile daemon is
-planned. The runtime has no app pairing; HQ serves HTTP and an external tunnel
+The intended deployment runs the same HQ package everywhere. VM domain wrappers
+embed it in one process; the Mac's generic HQ replaces the preview and observes
+local interactive sessions with worker management disabled. Preserve the Mac's
+existing SSH forward and disabled legacy service; runtime identifiers belong in
+the handoff devlog. The runtime has no app pairing; HQ serves HTTP and an external tunnel
 such as ngrok will provide public HTTPS. Tunnel URL and deployment remain pending.
 No Serve/Funnel or application-managed certificate feature is part of the plan.
 
@@ -35,7 +37,9 @@ configuration. See the [monitor contract](../README.md#actions-and-notifications
 Current test results belong in the latest devlog. The
 [browser evidence index](../tests/browser/README.md) separately records prior
 real-app toy actions, menus and reconnect tests; those do not validate a newly
-deployed federation or physical iPhone. No deployment completion is claimed here.
+deployed federation or physical iPhone. The
+[handoff devlog](devlog/claude_20261008-federated-hq-lifecycle.md) records the
+parent-reported primary activation and the other nodes' staging status.
 
 ## Confirmed requirements
 

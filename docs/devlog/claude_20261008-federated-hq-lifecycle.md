@@ -144,7 +144,7 @@ the syntax and a generic mixed-port example.
 The parent's target VM plan preserves HQ loopback port 8377 and the existing
 tailscaled private listener unchanged, while HQ also binds its Tailscale address
 on port 8389. The planned root peer URL is `http://100.120.250.112:8389`.
-This records the requested runtime routing, not a completed cutover.
+The later deployment report below confirms this routing on the primary node.
 
 The parent reports nine added bind-parser cases and **29 targeted tests passing**.
 This documentation pass independently reran
@@ -165,11 +165,20 @@ The frontend agent reports full checks passing at **390px and 1440px** after
 federation leaf-count and label normalization changes. These frontend and backend
 results are owner-reported; this final documentation pass did not rerun tests.
 
-The wheel was built and is being staged, with SHA-256
+The earlier wheel has SHA-256
 `d4d715f45ea715148104e860b971ff7f5d6e5b21c3f91029c0b47faa1dca8f61`.
-It is **not activated** and predates the fixes below. Activation is paused pending
-a newly built wheel. Verified deployment notes will follow activation. No commit
-was made here.
+It predates the fixes below. The parent's corrected deployment report confirms
+that this wheel was activated on the **Work-A primary** before the hold:
+**PID 2621836** serves both `127.0.0.1:8377` and `100.120.250.112:8389` in one
+process. Both listeners passed tokenless `/api/sessions` checks; `/hq` returned
+HTTP 200, and two routines remain enabled. Existing tailscaled **PID 40278** was
+left untouched. **BC, Work-B, and Sahalat are staged only.** These are actual
+deployment identifiers and parent-reported checks, not illustrative examples or
+checks performed by this documentation pass.
+
+The parent is building a replacement wheel containing both review fixes below;
+its activation has not been reported. This supersedes the earlier incorrect
+statement that the first wheel was unactivated everywhere. No commit was made here.
 
 ## Final-review monitor fixes
 
@@ -185,9 +194,84 @@ regression that verifies a second census proceeds. The prior 210-test result
 predates these final-review fixes; no new full-suite or fleet-lock regression
 result is claimed here. This documentation follow-up only checks documentation.
 
+## Corrected Mac ownership after preflight
+
+The parent reports that the old Mac HQ plist is **disabled**, with no active
+process. Mac `127.0.0.1:8377` is owned by SSH forward **PID 19721**, managed by
+`work-a-hq-tunnel`, forwarding to the VM. Preserve that forward and the disabled
+state. After a failed bootstrap, the original disabled plist was restored exactly.
+
+The corrected local deployment uses persistent **`com.local.cc-tmux-hq`** at
+port **8389** to replace the preview with the same generic package. Its root
+configuration is `~/.config/cc-tmux-api/hq.json`, with
+`CC_TMUX_MANAGE_WORKERS=0`: it observes local interactive sessions and does not
+run a Mac domain wrapper or duplicate VM schedules. VM domain wrappers remain
+in place. This supersedes the abandoned local-wrapper plan; it does not claim a
+new successful bootstrap or endpoint check beyond the parent's report.
+
+The abandoned local-wrapper plan's `uv sync` changed the career HQ lockfile.
+The parent will restore only its own change if verified; this documentation pass
+does not modify that lockfile or assert that restoration is complete.
+
+## Verified deployment: current state
+
+This parent-verified deployment report supersedes earlier staging and activation
+status above; those entries remain historical evidence. All VM owners now run
+the final wheel with SHA-256
+`149da13b9c9e5d448d11a1f1538abdae6592ae2e0bf940001d1e7f74214a2133`.
+
+| Runtime owner | PID | Verified listeners / ownership |
+|---|---|---|
+| Work-A primary | `2647811` | One process: `127.0.0.1:8377`, `100.120.250.112:8389` |
+| BC | `2651066` | Local port `8379` |
+| Work-B | `2963036` | One process: `127.0.0.1:8378`, `100.83.50.61:8378`, `192.168.0.157:8378`; root uses the LAN URL because its Tailscale address is unreachable from the Mac |
+| Sahalat | `1906477` | One process: `127.0.0.1:8377`, `192.168.50.198:8377`; service enabled, `Linger=yes` |
+| Mac generic HQ | `35507` | Persistent `com.local.cc-tmux-hq`: `127.0.0.1:8389`, `100.115.53.98:8389`; root revision `f462870`, no domain wrapper, `CC_TMUX_MANAGE_WORKERS=0` |
+
+All **31 runtime package files** on the Mac were verified byte-identical to the
+VM wheel. Root HTTP peer GET checks found **11 alive sessions**, **8 federated**,
+with all **7 API host rows available**; the UI reports **4 leaf machines**.
+These counts describe that observation, not a fixed fleet size or completion of
+browser lifecycle/cascade E2E; subsequent results are recorded below.
+
+Root state is `~/.local/state/cc-tmux-api-hq`. Local history and VAPID state were
+migrated from the preview, retaining the source. No ended remote records,
+subscriptions or mutes existed to migrate. The old SSH forward **PID 19721** and
+disabled legacy plist remain unchanged. Preview **PID 73085** was stopped by
+exact PID. These are parent-reported runtime checks; this documentation pass
+performed no process, service or state changes.
+
+## Final real-browser verification
+
+The parent reports a real Chrome lifecycle check using only the owned local toy:
+pane **%121**, Claude **PID 6697**, with exact cwd and UUID verified before
+`tmux kill-session` targeted **`cc-mobile-research-toy`** alone. The session
+transitioned from alive to ended while retained in the list: **11 total,
+10 alive, 1 ended**. The composer and Send control were removed; an ended-session
+action returned **409**, `Session has ended and is read-only`.
+
+Evidence is `/private/tmp/hq-ended-live-report.json`, with private screenshots
+`/private/tmp/hq-toy-alive.png` and `/private/tmp/hq-toy-ended.png`. The initial
+harness incorrectly expected a disabled textbox; the UI removes it. The corrected
+continuation passed API, UI and 409 checks. These are parent-reported results,
+not browser operations performed by this documentation pass.
+
+The real two-relay cascade's **nine actions** are also reported passing against
+a fresh native result; detailed action evidence is still awaited from the browser
+agent. Relay **PID 39602** was verified and stopped by exact PID. Persistent HQ
+**PID 35507** remains running, with Chrome opened to `http://100.115.53.98:8389`.
+
 ## Pending parent integration
 
-The old-HQ replacement and external tunnel deployment remain pending. The parent
+Final screenshot review found old terminal tail text above the answers in the
+review card. Visual sign-off is pending: the frontend agent is implementing a
+display-only clip from the active `Review your answers` through `Ready to submit`
+region. Backend behavior is unchanged. The parent plans the `0.4.1` patch via
+`uv version`, followed by a new wheel and all-node upgrades. Neither the corrected
+screenshot nor completion of that rollout has been verified here; await final
+evidence before calling the review card clean. Earlier functional results stand.
+
+The detailed cascade report and external tunnel deployment remain pending. The parent
 reports automatic approval review blocked the public tunnel invocation; specific
 user confirmation of exposing the control API publicly is pending. No tunnel was
 started by this documentation pass and no live HTTPS endpoint is claimed. No public

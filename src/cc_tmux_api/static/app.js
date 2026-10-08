@@ -205,6 +205,14 @@ function TranscriptEmpty({ session, openTerminal }) {
 // Selection commits a single choice or toggles a checkbox. Review submission
 // uses its own action; typing only inserts text and never presses Enter.
 const isFreeChoice = option => option?.kind ? option.kind === 'free_text' : /^(?:type something(?: else)?|other|custom(?: answer)?|free[- ]text)[.… ]*$/i.test(option?.label || '');
+function activeReviewSection(tail) {
+  const lines = String(tail || '').split(/\r?\n/);
+  const markers = lines.map(line => line.trim());
+  const start = markers.lastIndexOf('Review your answers');
+  if (start < 0) return null;
+  const end = markers.findIndex((line, index) => index > start && line === 'Ready to submit your answers?');
+  return end < 0 ? null : lines.slice(start, end + 1).join('\n');
+}
 function Question({ id, menu, tail, disabled, act }) {
   // A screen signature can change when native input replaces its placeholder.
   // Keep drafts and confirmed custom-option identity stable within this question.
@@ -217,6 +225,7 @@ function Question({ id, menu, tail, disabled, act }) {
   const [inserted, setInserted] = useState(null);
   const focused = menu.options.find(o => o.index === menu.focused_index);
   const review = menu.kind === 'review';
+  const reviewSection = review ? activeReviewSection(tail) : null;
   const free = !review && customChoice(focused);
   const hasInserted = inserted !== null && inserted === focused?.index;
   const submitOption = menu.options.find(option => option.kind === 'submit' || option.kind === 'next');
@@ -224,7 +233,7 @@ function Question({ id, menu, tail, disabled, act }) {
   // Backend select focuses custom text without submitting or toggling it.
   const choose = option => act('select', { index:option.index });
   return html`<section class="question-card" aria-label="Pending question"><div class="question-label">${review ? 'Review your answer' : 'Your input is needed'}<span>${review ? 'Ready to submit' : menu.multi_select ? 'Multiple choice' : 'Single choice'}</span></div><h3>${menu.question || 'Choose an option in the terminal'}</h3>
-    ${review && html`<div class="review-summary"><div class="message-author">Current answer review</div><pre>${tail || 'Review details are unavailable. Refresh the session before submitting.'}</pre></div>`}
+    ${review && html`<div class="review-summary"><div class="message-author">Current answer review</div>${reviewSection ? html`<pre>${reviewSection}</pre>` : html`<p>Current review is unavailable. Open the Terminal tab to check your answers before submitting.</p>`}</div>`}
     <div class="question-options">${menu.options.filter(o => !['submit','next'].includes(o.kind)).map(o => html`<button class=${`question-option ${o.index === menu.focused_index ? 'focused' : ''} ${o.selected ? 'chosen' : ''}`} disabled=${disabled || review || !Number.isInteger(menu.focused_index)} aria-pressed=${menu.multi_select ? !!o.selected : undefined} onClick=${() => choose(o)}><span class=${`choice-mark ${menu.multi_select ? 'square' : ''}`}>${o.selected && html`<${Icon} name="check" size=${14}/>`}</span><span><strong>${o.label}</strong>${o.description && html`<small>${o.description}</small>`}</span>${o.index === menu.focused_index && html`<span class="focus-label">Focused</span>`}</button>`)}</div>
     <p class="question-help">${review ? 'Check your answers, then submit them together.' : menu.multi_select ? 'Tap to toggle a choice. Review when your selection is ready.' : 'Tap a choice to send it directly.'}</p>
     ${free && html`<form class="answer-form" onSubmit=${async e => { e.preventDefault(); if (disabled || !answer.trim()) return; if (await act('type', {text:answer})) { setAnswer(''); saveDraft(draftId, ''); setInserted(focused.index); } }}><label for="custom-answer">Your answer</label><textarea id="custom-answer" rows="2" value=${answer} disabled=${disabled} onInput=${e => { setAnswer(e.target.value); setSaved(saveDraft(draftId, e.target.value)); }} placeholder="Type your own answer…"/><div class="answer-footer"><span role="status">${hasInserted ? 'Text inserted. Confirm when ready.' : !saved ? 'Draft could not be saved on this device.' : 'Inserts text without submitting.'}</span><button disabled=${disabled || !answer.trim()}>Insert answer</button></div></form>`}

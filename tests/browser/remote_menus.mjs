@@ -1,6 +1,16 @@
 import { join } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+
+export function menuAnswers(variant = process.env.MOBILE_MENU_VARIANT || 'original') {
+  if (variant === 'current-review') return { color: 'Red', gear: ['Map', 'Lamp'], snack: 'Pear slices' };
+  if (variant === 'original') return { color: 'Green', gear: ['Map', 'Rope'], snack: 'Oat biscuit, lightly salted' };
+  throw new Error(`Unknown menu variant: ${variant}`);
+}
 
 export async function auditMenus({ page, expect, detail, actionPath, verifyNative, nativeTail, evidence, report }) {
+  const answers = menuAnswers();
+  const currentReview = process.env.MOBILE_MENU_VARIANT === 'current-review';
+  if (currentReview && process.env.MOBILE_RESUME_MENU === '1') throw new Error('Current-review verification requires a fresh batch');
   const shot = async label => {
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'No horizontal menu overflow').toBe(true);
@@ -24,7 +34,7 @@ export async function auditMenus({ page, expect, detail, actionPath, verifyNativ
       throw new Error(`${label}: HTTP ${result.status()} ${JSON.stringify(body)}; not retried`);
     }
     await expect(page.getByRole('button', { name: 'Refresh session', exact: true })).toBeEnabled();
-    report.checks.push({ name: label, status: 'passed' });
+    report.checks.push({ name: label, status: 'passed', http: result.status() });
   };
   const menu = async question => {
     await expect.poll(async () => (await detail()).menu?.question || '', { timeout: 45000 }).toContain(question);
@@ -34,17 +44,19 @@ export async function auditMenus({ page, expect, detail, actionPath, verifyNativ
   };
   const resuming = process.env.MOBILE_RESUME_MENU === '1';
   const marker = resuming ? 'BROWSER_MENU_RESULT_1791479390303' : `BROWSER_MENU_RESULT_${Date.now()}`;
+  report.expectedAnswers = answers;
+  report.marker = marker;
   const prompt = `Call AskUserQuestion exactly once containing these three questions in order: (1) header Color, question "Which browser color?", multiSelect false, options Red (description Warm), Green (description Cool). (2) header Gear, question "Which browser gear?", multiSelect true, options Map (description Navigation), Lamp (description Light), Rope (description Climbing). (3) header Snack, question "Which browser snack?", multiSelect false, options Apple (description Fruit), Biscuit (description Baked). Wait for all answers, then print ${marker} followed by the exact received answers. Do not call any other tool.`;
   if (!resuming) {
   await refresh();
   await page.getByRole('textbox', { name: 'Message this session' }).fill(prompt);
   await action(page.getByRole('button', { name: 'Send message' }), 'real menu prompt sent');
   await menu('Which browser color?');
-  await action(page.locator('.question-option').filter({ has: page.locator('strong', { hasText: /^Green$/ }) }), 'single-select Green');
+  await action(page.locator('.question-option').filter({ has: page.getByText(answers.color, { exact: true }) }), `single-select ${answers.color}`);
   await menu('Which browser gear?');
   await action(page.locator('.question-option').filter({ has: page.locator('strong', { hasText: /^Map$/ }) }), 'multi-select Map');
   await refresh();
-  await action(page.locator('.question-option').filter({ has: page.locator('strong', { hasText: /^Rope$/ }) }), 'multi-select Rope');
+  await action(page.locator('.question-option').filter({ has: page.getByText(answers.gear[1], { exact: true }) }), `multi-select ${answers.gear[1]}`);
   await refresh();
   await expect(page.locator('.question-option.chosen')).toHaveCount(2);
   await shot('menu-multi-selected');
@@ -66,20 +78,33 @@ export async function auditMenus({ page, expect, detail, actionPath, verifyNativ
     await action(page.locator('.question-option').filter({ has: page.locator('strong', { hasText: /Type something|Other|Custom/i }) }), 'focus custom option');
     await refresh();
   }
-  await page.getByRole('textbox', { name: 'Your answer', exact: true }).fill('Oat biscuit, lightly salted');
+  await page.getByRole('textbox', { name: 'Your answer', exact: true }).fill(answers.snack);
   await action(page.getByRole('button', { name: 'Insert answer', exact: true }), 'insert custom answer');
   await shot('menu-custom-inserted');
   await action(page.getByRole('button', { name: 'Confirm typed answer', exact: true }), 'confirm custom answer');
   await expect.poll(async () => (await detail()).menu?.kind, { timeout: 15000 }).toBe('review');
   await refresh();
-  for (const answer of ['Green', 'Map, Rope', 'Oat biscuit, lightly salted']) await expect(page.locator('.review-summary')).toContainText(answer);
-  report.checks.push({ name: 'review exposes all three actual answers', status: 'passed' });
+  if (currentReview) await page.locator('.review-summary').scrollIntoViewIfNeeded();
   await shot('menu-review');
+  if (currentReview) {
+    const native = nativeTail();
+    const start = native.lastIndexOf('Review your answers');
+    await writeFile(join(evidence, 'native-review-before-submit.txt'), native, { mode: 0o600 });
+    const card = await page.locator('.question-card').innerText();
+    await writeFile(join(evidence, 'review-card-before-submit.txt'), card, { mode: 0o600 });
+    expect(start, 'Native current review block exists').toBeGreaterThanOrEqual(0);
+    const currentBlock = native.slice(start);
+    for (const value of [answers.color, ...answers.gear, answers.snack]) expect(currentBlock).toContain(value);
+    expect(card, 'No previous model result or previous answers in current review').not.toMatch(/BROWSER_MENU_RESULT|\bGreen\b|\bRope\b|Oat biscuit/);
+    report.checks.push({ name: 'current native review block; no old result or answers in review card', status: 'passed' });
+  }
+  for (const answer of [answers.color, ...answers.gear, answers.snack]) await expect(page.locator('.review-summary')).toContainText(answer);
+  report.checks.push({ name: 'review exposes all three actual answers', status: 'passed' });
   await action(page.getByRole('button', { name: 'Submit answer', exact: true }), 'submit batch review');
   await expect.poll(() => nativeTail(), { timeout: 45000 }).toMatch(new RegExp(`^[●⏺]\\s+${marker}`, 'm'));
   const tail = nativeTail();
   const latestResult = tail.slice(tail.lastIndexOf(marker));
-  expect(latestResult).toContain('Green'); expect(latestResult).toContain('Map'); expect(latestResult).toContain('Rope'); expect(latestResult).toContain('Oat biscuit, lightly salted');
+  for (const answer of [answers.color, ...answers.gear, answers.snack]) expect(latestResult).toContain(answer);
   report.checks.push({ name: 'real model result and native answers verified', status: 'passed', marker });
   report.checks.push({ name: 'API conversation mapping', status: 'observed', messages: (await detail()).messages.length, note: 'An unmapped safe-mode UUID may correctly fall back to terminal; no inferred mapping.' });
   report.pending = report.pending.filter(x => !['single-select', 'multi-select', 'free-text'].includes(x));

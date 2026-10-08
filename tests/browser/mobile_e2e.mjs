@@ -2,14 +2,14 @@ import { createRequire } from 'node:module';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { auditReadOnly } from './read_only_audit.mjs';
+import { testOrigin, auditFleet } from './federation_checks.mjs';
 
 // Dependencies deliberately live outside the repository's package metadata.
 const require = createRequire(join(process.env.MOBILE_BROWSER_ENV || '/private/tmp/cc-mobile-browser', 'package.json'));
 const { chromium, devices, expect } = require('@playwright/test');
 const selfTest = process.argv.includes('--self-test');
-const baseURL = process.env.MOBILE_BASE_URL || 'http://127.0.0.1:8389';
+const baseURL = testOrigin();
 const origin = new URL(baseURL);
-if (origin.origin !== 'http://127.0.0.1:8389') throw new Error('Harness is restricted to the parent test server on 127.0.0.1:8389');
 if (!selfTest && process.env.MOBILE_READY !== '1') throw new Error('Wait for parent readiness, then set MOBILE_READY=1');
 const evidence = resolve(process.env.MOBILE_EVIDENCE_DIR || '/private/tmp/cc-mobile-browser/evidence', new Date().toISOString().replaceAll(':', '-'));
 await mkdir(evidence, { recursive: true, mode: 0o700 });
@@ -65,6 +65,7 @@ try {
         const sessions = await context.request.get('/api/sessions');
         if (!sessions.ok()) throw new Error(`Session discovery failed with HTTP ${sessions.status()}`);
         fleet = await sessions.json();
+        if (process.env.MOBILE_ALL_DETAILS === '1') await auditFleet({ context, fleet, report, name });
         report.checks.push({ name: `${name}: real sessions API`, status: 'passed', sessions: fleet.sessions.length, hosts: fleet.hosts.length, connectedHosts: fleet.hosts.filter(h => h.available).length });
         await Promise.all([
           page.waitForResponse(response => new URL(response.url()).pathname === '/api/sessions' && response.request().method() === 'GET' && response.ok()),

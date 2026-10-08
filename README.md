@@ -14,6 +14,13 @@ HTTPS. The tunnel choice and public URL remain pending; no Serve or Funnel is
 part of the plan. See [the current handoff](docs/devlog/claude_20261008-federated-hq-lifecycle.md)
 for source/test evidence and limits. Domain logic belongs in apps **on top**.
 
+The parent has verified activation of all VM owners and the persistent generic
+Mac HQ, replacing its preview. Root HTTP peer reads and the real-browser lifecycle
+check passed; nine two-relay cascade actions are reported passing, with the detailed
+report pending. Exact build, listener, process and state
+ownership is recorded in the [current deployment report](docs/devlog/claude_20261008-federated-hq-lifecycle.md#verified-deployment-current-state).
+Public HTTPS remains blocked and is not live.
+
 ## Run
 
 ```bash
@@ -138,8 +145,9 @@ Configuration loads first; `--app` then imports the wrapper module before the
 CLI imports `server`. The wrapper can establish routine/workdir/worker defaults
 before those modules read their import-time configuration. The CLI serves that app
 on its configured sockets in one process. During deployment, replace the old HQ
-process so each worker registry has one revival/scheduler owner. This handoff
-does not claim that replacement is deployed.
+process so each worker registry has one revival/scheduler owner. Deployment status
+and build-specific verification are recorded in the
+[handoff devlog](docs/devlog/claude_20261008-federated-hq-lifecycle.md).
 
 ## Configuration (env vars)
 

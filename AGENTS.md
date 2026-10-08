@@ -14,8 +14,15 @@ remain pending, and application certificate handling is outside this design.
 Replace the old HQ deployment using the same application; use the
 CLI's embedding path for domain routes in one process, including listeners with
 different ports (see README configuration). Do not invent a permanent
-second mobile service or duplicate a registry's worker lifecycle owner. Deployment
-is the parent's ongoing work; source changes alone do not establish readiness.
+second mobile service or duplicate a registry's worker lifecycle owner. The parent
+has verified all VM owners and persistent Mac HQ are active. Real-browser lifecycle
+verification passed, including removed ended-session input and action rejection;
+nine two-relay cascade actions are reported passing, with detailed evidence pending.
+Source changes alone do not establish readiness.
+On the Mac, preserve the existing SSH forward and disabled legacy HQ service.
+The persistent generic HQ has replaced the preview, with worker management disabled;
+domain wrappers remain on the VMs. Exact runtime ownership is recorded in the
+handoff devlog linked above.
 
 Existing ownership boundaries:
 - `src/cc_tmux_api/workers.py` owns the unattended worker namespace and its revival
