@@ -343,6 +343,14 @@ def transcript_messages(meta, workdir):
         role = entry.get('type')
         if role not in ('user', 'assistant') or entry.get('isMeta'):
             continue
+        origin = entry.get('origin')
+        # Claude stores injected task notices as user-role messages. They are
+        # internal events, not text authored by the person in this conversation.
+        if role == 'user' and (
+            entry.get('promptSource') == 'system' or entry.get('queueTranscriptOnly') is True
+            or isinstance(origin, dict) and origin.get('kind') == 'task-notification'
+        ):
+            continue
         if entry.get('sessionId') and entry['sessionId'] != sid:
             continue
         message = entry.get('message') or {}

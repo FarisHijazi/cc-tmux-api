@@ -297,6 +297,28 @@ def test_transcript_tail_bounded(tmp_path):
     assert probe.read_tail(path) == '{"type":"user"}\n'
 
 
+@pytest.mark.parametrize('metadata', [
+    {'origin': {'kind': 'task-notification'}},
+    {'promptSource': 'system'},
+    {'queueTranscriptOnly': True},
+])
+def test_injected_notices_are_not_human_messages(tmp_path, monkeypatch, metadata):
+    path = tmp_path / f'{SID}.jsonl'
+    monkeypatch.setattr(probe, 'transcript_path', lambda *_: path)
+    notice = '<task-notification><task-id>task-example</task-id><status>stopped</status></task-notification>'
+    entries = [
+        {'type': 'user', 'message': {'content': notice}, **metadata},
+        # A person quoting the same XML is still a genuine conversation message.
+        {'type': 'user', 'message': {'content': notice}},
+        {'type': 'assistant', 'message': {'content': 'That was a background task notice.'}},
+    ]
+    path.write_text('\n'.join(json.dumps(entry) for entry in entries))
+    assert probe.transcript_messages({'sid': SID}, '/workspace') == [
+        {'role': 'user', 'text': notice},
+        {'role': 'assistant', 'text': 'That was a background task notice.'},
+    ]
+
+
 def test_waiting_attention_and_policy_unavailable():
     assert probe.presentation({}, probe.parse_menu(SINGLE))['notification_eligible'] is True
     assert probe.presentation({'event': 'stop', 'token': 'opaque'}, None) == {

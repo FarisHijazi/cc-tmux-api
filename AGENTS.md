@@ -21,6 +21,9 @@ verification passed, including removed ended-session input and action rejection;
 earlier two-relay cascade checks and the final fresh nine-action remote menu batch
 passed. The devlog records artifact evidence and remaining device-test limits.
 Source changes alone do not establish readiness.
+Conversation messages must exclude system-injected user-role records using their
+origin metadata, not text matching. Human quotations of task notices remain human
+messages. See [the notice-filter incident](docs/devlog/claude_20261008-system-notice-filter.md).
 On the Mac, preserve the existing SSH forward and disabled legacy HQ service.
 The persistent generic HQ has replaced the preview, with worker management disabled;
 domain wrappers remain on the VMs. Exact runtime ownership is recorded in the
