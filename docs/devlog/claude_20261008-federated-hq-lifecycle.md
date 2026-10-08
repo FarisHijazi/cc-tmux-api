@@ -263,15 +263,39 @@ agent. Relay **PID 39602** was verified and stopped by exact PID. Persistent HQ
 
 ## Pending parent integration
 
-Final screenshot review found old terminal tail text above the answers in the
-review card. Visual sign-off is pending: the frontend agent is implementing a
-display-only clip from the active `Review your answers` through `Ready to submit`
-region. Backend behavior is unchanged. The parent plans the `0.4.1` patch via
-`uv version`, followed by a new wheel and all-node upgrades. Neither the corrected
-screenshot nor completion of that rollout has been verified here; await final
-evidence before calling the review card clean. Earlier functional results stand.
+Latest parent-verified deployment supersedes the earlier build/PID snapshot:
+**0.4.1 is active on all four VM units**, using wheel SHA-256
+`98f9aa2f25f06fa5231eda3435f0de8f4aff7b8c32145e459b9fffd51c4416cf`.
+Primary **PID 2773379** serves `100.120.250.112:8389` and loopback `8377`;
+BC **2776806** serves loopback `8379`; Work-B **3015673** serves
+`192.168.0.157:8378` plus its Tailscale and loopback listeners; Sahalat
+**1923713** serves `192.168.50.198:8377`. Auth, sessions, workers and routes
+checks are healthy with matching package bytes; both primary routines remain.
+Mac persistent HQ is **PID 95054**, root revision **`3ceeadb`**, with all **31
+runtime files byte-identical** to that wheel. After restart, GET checks showed
+**11 total, 10 alive, 1 ended**, with all hosts available.
 
-The detailed cascade report and external tunnel deployment remain pending. The parent
+## Final 0.4.1 visual closure
+
+The review-card display fix is now verified. This pass read the final artifact
+`/private/tmp/cc-mobile-browser/evidence/toy-2026-10-08T18-28-29.008Z/report.json`:
+all nine requests passed, native completion and current-review checks passed,
+and `pageErrors` is empty. The parent visually inspected `menu-review.png` in
+that directory: **Red**, **Map + Lamp**, and **Pear slices** are all visible;
+the review card excludes the old `BROWSER_MENU_RESULT`, Green, Rope and Oat text.
+This closes the stale-tail visual issue with the display-only active-review clip;
+backend behavior is unchanged.
+
+The fresh batch used the same owned remote toy and confirms single-select,
+multi-select, custom text, review and native submission. Its recorded route is
+`work-a → local`; the earlier two-relay result remains separate historical
+evidence. The report notes zero mapped conversation messages with terminal
+fallback and leaves physical iPhone keyboard testing pending. No physical-device
+or transcript-mapping success is inferred from this menu test.
+
+## Remaining external integration
+
+External tunnel deployment remains pending. The parent
 reports automatic approval review blocked the public tunnel invocation; specific
 user confirmation of exposing the control API publicly is pending. No tunnel was
 started by this documentation pass and no live HTTPS endpoint is claimed. No public

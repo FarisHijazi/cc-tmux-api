@@ -360,9 +360,10 @@ and HTTP 409 at handoff; those checks are not claimed complete here. The remote
 toy remained untouched by the parent. This worker left the relay running and
 all its Chrome contexts closed.
 
-## Pending narrow review-clipping retest
+## Narrow review-clipping retest
 
-Prepared only; wait for parent to serve the UI patch and give go-ahead.
+Preparation required parent to serve the UI patch and give go-ahead; the
+completed result is recorded below.
 `MOBILE_MENU_VARIANT=current-review` selects Red, Map/Lamp, and “Pear slices”
 instead of the old batch answers. It skips the broad draft/reconnect audit.
 Before Submit it saves `menu-review.png`, `native-review-before-submit.txt`, and
@@ -382,3 +383,16 @@ MOBILE_BASE_URL=http://100.115.53.98:8389 node tests/browser/toy_actions.mjs
 
 Preparation passed syntax and offline answer-configuration checks. No browser,
 app requests, native pane reads, or model input occurred during this preparation.
+
+Parent subsequently gave go-ahead for root `http://127.0.0.1:8389` on 0.4.1.
+The narrow live run passed; evidence directory:
+`/private/tmp/cc-mobile-browser/evidence/toy-2026-10-08T18-28-29.008Z/`.
+All nine UI actions returned HTTP 200 and no page errors occurred. The actual
+390×844 `menu-review.png` visibly contains Red, Map/Lamp and Pear slices, matching
+`native-review-before-submit.txt`. `review-card-before-submit.txt` contains no old
+model marker, Green, Rope or Oat biscuit. This resolves the earlier stale review
+summary visual finding. Submission completed and `native-toy-tail.txt` verified
+fresh marker `BROWSER_MENU_RESULT_1791484113504` with the new answers. Native
+identity/generation checks ran before input; only owned remote toy `%37` received
+input. No broader audits or other session interactions were performed. Chrome
+closed on completion; relay was not contacted or started. No commit was created.

@@ -15,9 +15,11 @@ Replace the old HQ deployment using the same application; use the
 CLI's embedding path for domain routes in one process, including listeners with
 different ports (see README configuration). Do not invent a permanent
 second mobile service or duplicate a registry's worker lifecycle owner. The parent
-has verified all VM owners and persistent Mac HQ are active. Real-browser lifecycle
+has verified 0.4.1 on all VM owners and persistent Mac HQ with matching runtime
+package bytes; 0.4.1 review-card visual verification passed. Real-browser lifecycle
 verification passed, including removed ended-session input and action rejection;
-nine two-relay cascade actions are reported passing, with detailed evidence pending.
+earlier two-relay cascade checks and the final fresh nine-action remote menu batch
+passed. The devlog records artifact evidence and remaining device-test limits.
 Source changes alone do not establish readiness.
 On the Mac, preserve the existing SSH forward and disabled legacy HQ service.
 The persistent generic HQ has replaced the preview, with worker management disabled;
