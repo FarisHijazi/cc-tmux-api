@@ -18,4 +18,13 @@ in the conversation. No terminal input or task restart is part of this fix.
 
 Validation: 78 fleet/probe tests passed, including three metadata variants and
 preservation of identical text genuinely sent by a person. Ruff passed. Version
-0.4.2 is packaged; live deployment and browser verification follow below.
+0.4.2 is packaged and deployed on the Mac and all four existing/new VM service
+owners. Runtime configuration and session ownership were preserved.
+
+The full backend suite passed all 217 tests. A fresh Chrome context opened the
+exact affected Work-B conversation through the Mac aggregator: 24 messages remain
+(7 human, 17 assistant), and the internal notice is absent from both API output
+and the rendered conversation. No page errors or session inputs occurred.
+Evidence: `/private/tmp/hq-system-notice-report.json` and
+`/private/tmp/hq-system-notice-fixed.png`. These are private runtime artifacts,
+not repository assets. All VM package bytes match the same 0.4.2 wheel.

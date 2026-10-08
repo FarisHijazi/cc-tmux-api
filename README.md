@@ -14,7 +14,7 @@ HTTPS. The tunnel choice and public URL remain pending; no Serve or Funnel is
 part of the plan. See [the current handoff](docs/devlog/claude_20261008-federated-hq-lifecycle.md)
 for source/test evidence and limits. Domain logic belongs in apps **on top**.
 
-The parent has verified 0.4.1 activation of all VM owners and the persistent generic
+The parent has verified 0.4.2 activation of all VM owners and the persistent generic
 Mac HQ with matching runtime package bytes, replacing its preview. Root HTTP peer
 reads, real-browser lifecycle checks, and review-card visual verification passed.
 The fresh owned remote menu batch passed all nine actions and native completion;

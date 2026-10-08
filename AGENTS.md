@@ -15,7 +15,7 @@ Replace the old HQ deployment using the same application; use the
 CLI's embedding path for domain routes in one process, including listeners with
 different ports (see README configuration). Do not invent a permanent
 second mobile service or duplicate a registry's worker lifecycle owner. The parent
-has verified 0.4.1 on all VM owners and persistent Mac HQ with matching runtime
+has verified 0.4.2 on all VM owners and persistent Mac HQ with matching runtime
 package bytes; 0.4.1 review-card visual verification passed. Real-browser lifecycle
 verification passed, including removed ended-session input and action rejection;
 earlier two-relay cascade checks and the final fresh nine-action remote menu batch
