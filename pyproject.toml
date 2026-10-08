@@ -1,6 +1,6 @@
 [project]
 name = "cc-tmux-api"
-version = "0.4.2"
+version = "0.4.3"
 description = "Local daemon that spawns, lists, kills, and schedules unattended Claude Code workers in tmux (with reboot revival)"
 readme = "README.md"
 authors = [

@@ -41,6 +41,10 @@ Draft typing is allowed only when the reserved toy is discovered, and never sent
 The allowed origins are the persistent HQ `http://100.115.53.98:8389`, the
 parent-owned ephemeral relay `http://127.0.0.1:8391`, and the historical local
 preview `http://127.0.0.1:8389`. The persistent HQ is now the default.
+One additional HTTPS origin can be explicitly allowlisted at runtime with
+`MOBILE_APPROVED_ORIGIN`; this does not select the target or bypass readiness.
+Both the approved origin and `MOBILE_BASE_URL` must be canonical origins with
+no credentials, path, query, or fragment (a trailing slash is allowed).
 Read-only smoke mode logs in via `/api/auth/login` only when required, checks `/api/sessions`,
 waits for the UI's successful sessions response, and captures 390×844 and
 1440×1000 views plus a shortened mobile viewport. UI API writes are blocked.
@@ -396,3 +400,72 @@ fresh marker `BROWSER_MENU_RESULT_1791484113504` with the new answers. Native
 identity/generation checks ran before input; only owned remote toy `%37` received
 input. No broader audits or other session interactions were performed. Chrome
 closed on completion; relay was not contacted or started. No commit was created.
+
+## HTTPS deployment preparation
+
+Deployment is not ready yet; wait for the parent's explicit run request before
+contacting it. Configure the actual approved HTTPS origin at runtime; the domain
+below is only a placeholder. Setting the allowlist does not launch a browser:
+
+```sh
+export MOBILE_APPROVED_ORIGIN=https://hq.example.com
+export MOBILE_BASE_URL="$MOBILE_APPROVED_ORIGIN"
+```
+
+After readiness, the existing `mobile_e2e.mjs` read-only harness and
+`toy_actions.mjs` fresh-batch harness accept that exact origin. Their readiness,
+action gates, isolated Chrome contexts, and reserved remote toy PID/generation
+checks remain required. The ended local toy is never a model-input target.
+HTTPS certificate verification remains enabled. No wildcard/subdomain approval
+is inferred, and malformed or non-HTTPS approved origins fail closed.
+
+Preparation validation: JavaScript syntax, offline allowlist acceptance/rejection,
+and closed harness readiness gates. No deployment requests, browser launch,
+native reads, or session input during this preparation. No commit created.
+
+## Public HTTPS deployment result — 20:54 UTC
+
+Real isolated Chrome verified 390×844 and 1440×1000 against the runtime-approved
+HTTPS origin. Fleet: 12 records, 10 alive and two ended, five connected machines.
+All actual session details were read successfully in the recovery audit;
+identity/routes, grouping, search, offline recovery and viewport checks passed.
+Ended detail correctly removes composer and keyboard controls. Mac ansible now
+has 20 mapped messages. No personal Chrome profile was accessed.
+
+Evidence and retained failures:
+
+- `2026-10-08T20-50-47.127Z/report.json`: initial harness incorrectly required
+  live transcript status on historical ended rows. `federation_checks.mjs` now
+  restricts that assertion to alive rows and selects an alive UI audit sample.
+- `2026-10-08T20-51-19.866Z/report.json`: real transient HTTP 503 reading Mac
+  ansible on phone; desktop subsequently passed. This failure is not erased.
+- `2026-10-08T20-52-24.024Z/report.json`: both viewports read every detail;
+  desktop passed fully. Phone attention expected three from its old snapshot
+  but rendered four while the concurrent owned-toy batch opened a question.
+- `https-phone-recheck-2026-10-08T20-53-42.726Z/report.json`: narrow sequential
+  read-only recheck after toy completion passed current attention count three,
+  five-host footer, and ended detail with absent composer/controls. Screenshots
+  include `iphone-inbox.png`, `iphone-attention.png`, `iphone-ended-read-only.png`.
+
+These directories are under `/private/tmp/cc-mobile-browser/evidence/`.
+The two overlapping tests caused the attention assertion race; it was not a UI
+defect. The transient 503 remains an observed deployment failure with recovery.
+
+Fresh HTTPS owned-remote-toy evidence:
+`/private/tmp/cc-mobile-browser/evidence/toy-2026-10-08T20-52-12.732Z/report.json`.
+All nine actions returned HTTP 200, current review contains only Red, Map/Lamp,
+and Pear slices, and native marker `BROWSER_MENU_RESULT_1791492738055` verifies
+the final received answers. Zero page errors. Only the exact owned remote toy
+received input; no extra batch was sent for the read-only recovery checks.
+
+Secure context and push evidence:
+`/private/tmp/cc-mobile-browser/evidence/https-push-2026-10-08T20-51-56.501Z/report.json`.
+Both Chrome contexts were secure with activated `/sw.js`, PushManager and
+Notification support, available push config/public key, and enabled notification
+UI. The desktop enrollment attempt displayed “Registration failed - permission
+denied”; no subscription was created or left behind. Push setup is ready but
+delivery is unverified. Physical iPhone/PWA behavior remains unverified.
+
+Temporary focused verifiers are in `/private/tmp/cc-mobile-browser/`:
+`https_push_audit.mjs` and `https_attention_recheck.mjs`. No product/infra files
+were edited. All Chrome contexts closed and no commit created.

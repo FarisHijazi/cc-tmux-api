@@ -1,5 +1,9 @@
 # Federated HQ and lifecycle documentation
 
+The [ftower deployment log](claude_20261008-ftower-deployment.md) supersedes this
+log's final aggregation topology and pending-public-HTTPS status. Earlier
+implementation and deployment evidence below is historical.
+
 Date: 2026-10-08. Documentation scope: `README.md`, `AGENTS.md`,
 `docs/mobile-control-research.md`, and this log. No deployment or commit is part
 of this task. The parent is still changing and deploying the implementation.

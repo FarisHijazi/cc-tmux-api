@@ -8,10 +8,10 @@ node. Local and SSH probes remain available for hosts without an HQ peer.
 
 The current design replaces the old HQ with this application, embedded in the
 same process where domain routes are needed, rather than adding a permanent
-mobile daemon. The requested runtime has **no app pairing token**. HQ serves HTTP
-on explicit interfaces; ngrok or another external tunnel will provide public
-HTTPS. The tunnel choice and public URL remain pending; no Serve or Funnel is
-part of the plan. See [the current handoff](docs/devlog/claude_20261008-federated-hq-lifecycle.md)
+mobile daemon. The requested runtime has **no app pairing token**, including
+public HTTPS access through an external reverse proxy or tunnel. HQ serves HTTP
+on explicit interfaces; no Serve or Funnel is part of the plan.
+See [the current handoff](docs/devlog/claude_20261008-federated-hq-lifecycle.md)
 for source/test evidence and limits. Domain logic belongs in apps **on top**.
 
 The parent has verified 0.4.2 activation of all VM owners and the persistent generic
@@ -20,7 +20,9 @@ reads, real-browser lifecycle checks, and review-card visual verification passed
 The fresh owned remote menu batch passed all nine actions and native completion;
 earlier two-relay cascade checks also passed. Exact build, listener, process and state
 ownership is recorded in the [current deployment report](docs/devlog/claude_20261008-federated-hq-lifecycle.md#verified-deployment-current-state).
-Public HTTPS remains blocked and is not live.
+The persistent homelab aggregator runs 0.4.3 and connects directly to all four
+peers, including the now-local-only Mac HQ. Public HTTPS deployment and current
+verification are tracked in [the ftower deployment log](docs/devlog/claude_20261008-ftower-deployment.md).
 
 ## Run
 
@@ -34,7 +36,7 @@ HQ dashboard. Sessions groups existing Claude panes by host or directory, with
 search, attention filtering, conversation/terminal views, and guarded controls.
 Workers and Routines retain the unattended workflow described below;
 `#w-<session>` opens a worker card. Fleet links use `/#session=<encoded-id>`.
-The mobile upgrade is version 0.4.0 in this checkout; the upstream `uvx` command
+This checkout is version 0.4.3; the upstream `uvx` command
 above uses the published repository, not necessarily these uncommitted changes.
 
 For shareable `claude.ai/code/session_…` links per worker, enable remote
@@ -166,7 +168,7 @@ and build-specific verification are recorded in the
 | `CC_TMUX_HOSTS` | `[{"id":"local","label":"Local"}]` | JSON array of 1–32 targets: local, an existing `ssh` alias, or an HQ peer `url`; `ssh` and `url` are mutually exclusive |
 | `CC_TMUX_NODE_ID` | machine hostname | Stable, distinct node ID for ownership/cycle detection; 1–128 letters, digits, `_`, `.`, `:`, or `-` |
 | `CC_TMUX_TOKEN` | unset | Optional pairing/Bearer secret, at least 32 characters when configured; leave unset/empty for the requested runtime |
-| `CC_TMUX_PUBLIC_URL` | unset | Optional HTTPS origin without a path; requires a token. Leave unset/empty for direct Tailscale HTTP |
+| `CC_TMUX_PUBLIC_URL` | unset | Optional HTTPS origin without a path; adds its hostname and origin to the request checks. Works with or without a token; leave empty for direct HTTP |
 | `CC_TMUX_STATE_DIR` | `~/.local/state/cc-tmux-api` | Session-history SQLite store and separate push keys/subscriptions/preferences/deduplication/outbox |
 | `CC_TMUX_VAPID_SUBJECT` | `CC_TMUX_PUBLIC_URL` | `mailto:` contact or HTTPS subject for push configuration; fleet/lifecycle monitoring runs independently |
 
@@ -207,19 +209,17 @@ same process. Bare IPv4/IPv6 addresses use `CC_TMUX_PORT`.
 Bind and allowed-host values are comma-separated strings, not JSON arrays. Bind
 selects network listeners; allowed hosts checks HTTP Host names and does not open
 a socket. Existing environment variables override even empty config values, so
-the no-pairing launcher must not inherit a token or public URL. No browser pairing
+the no-pairing launcher must not inherit a token. No browser pairing
 step, Tailscale Serve, or Funnel is part of this runtime. This template configures
 the local/Tailscale HTTP backend; it is not a completed public-tunnel setup.
 
-Public HTTPS via ngrok or another tunnel is pending with the parent. The parent
-reports that automatic approval review blocked the tunnel invocation; explicit
-user confirmation of public control exposure is pending. No live HTTPS endpoint
-is claimed. Record the
-actual assigned URL only after it is verified, and validate forwarded host/scheme
-and browser-origin handling against this middleware. Do not assume
-`CC_TMUX_PUBLIC_URL` is a no-auth tunnel setting: the current implementation
-requires a token when that variable is set. The no-pairing contract must remain
-intact when the tunnel integration is finalized.
+For an external HTTPS endpoint, set `CC_TMUX_PUBLIC_URL` to its origin, such as
+`https://hq.example.com`, and leave `CC_TMUX_TOKEN` empty for the requested
+no-auth runtime. This configuration does not create a listener, proxy, or tunnel.
+The [security middleware](src/cc_tmux_api/security.py) continues to reject
+unrecognized hosts, cross-site API requests, and non-JSON mutations. Validate
+forwarded host/scheme and browser-origin handling when deploying the external
+endpoint; record its live verification in the deployment report.
 
 Give each HQ a distinct stable node ID. A target with only `id` and `label` probes
 the current machine; `ssh` probes an existing alias using batch-mode SSH and
@@ -414,13 +414,14 @@ Current federation/lifecycle checks and deployment limits are recorded in
 
 ## Security
 
-The requested backend leaves the token/public URL empty and serves HTTP on
-explicit loopback/Tailscale interfaces. API access has no application
+The requested backend leaves the token empty and serves HTTP on
+explicit interfaces. An external HTTPS origin can be set independently through
+`CC_TMUX_PUBLIC_URL`. API access has no application
 authentication in that mode; `/api/auth` returns
 `{required:false, authenticated:true}`. Host allowlisting, same-origin checks and
-JSON mutation requirements still apply. Public HTTPS will be supplied by an
-external tunnel, with its URL and integration still pending. No Serve or Funnel
-is planned. Mobile push/PWA device delivery remains unverified; server push
+JSON mutation requirements still apply. Public HTTPS termination is supplied by
+an external reverse proxy or tunnel; no Serve or Funnel is planned.
+Mobile push/PWA device delivery remains unverified; server push
 availability means configured, not delivered.
 
 Optional token pairing still covers legacy worker/routine/oneshot routes as well

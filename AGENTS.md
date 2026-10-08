@@ -9,8 +9,14 @@ tracks the current plan and verification; earlier devlogs remain history, not
 proof of current deployment. These are deliberately plain links, not `@` includes.
 
 The requested runtime has no app pairing token and no Serve/Funnel. HQ serves
-HTTP; ngrok or another external tunnel owns public HTTPS. The tunnel/public URL
-remain pending, and application certificate handling is outside this design.
+HTTP; the existing homelab Cloudflare Tunnel and Traefik own public HTTPS.
+The persistent ftower aggregator is published at the requested hostname; see
+[the ftower deployment log](docs/devlog/claude_20261008-ftower-deployment.md) for
+runtime ownership and verification. Application certificate handling remains
+outside this design. Public origins can be configured without an app token.
+The public deployment passed actual session-detail and mobile/desktop browser
+checks plus a native-verified nine-action remote question batch; physical iPhone
+push delivery remains unverified. Preserve that distinction in future reports.
 Replace the old HQ deployment using the same application; use the
 CLI's embedding path for domain routes in one process, including listeners with
 different ports (see README configuration). Do not invent a permanent
@@ -25,9 +31,10 @@ Conversation messages must exclude system-injected user-role records using their
 origin metadata, not text matching. Human quotations of task notices remain human
 messages. See [the notice-filter incident](docs/devlog/claude_20261008-system-notice-filter.md).
 On the Mac, preserve the existing SSH forward and disabled legacy HQ service.
-The persistent generic HQ has replaced the preview, with worker management disabled;
-domain wrappers remain on the VMs. Exact runtime ownership is recorded in the
-handoff devlog linked above.
+The persistent generic HQ has replaced the preview, with worker management disabled.
+The Mac now serves local sessions only; ftower connects directly to all four peers
+and also discovers its own local sessions. Domain wrappers remain on the VMs.
+The ftower deployment log supersedes the earlier aggregation/public-access state.
 
 Existing ownership boundaries:
 - `src/cc_tmux_api/workers.py` owns the unattended worker namespace and its revival

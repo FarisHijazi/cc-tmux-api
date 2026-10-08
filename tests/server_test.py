@@ -112,13 +112,12 @@ def test_muted_session_preferences_are_persistent(client, app):
     assert "host-pane" in client.get("/api/push/preferences").json()["muted"]
 
 
-def test_security_rejects_unsigned_cookie_and_insecure_remote_config(client):
+def test_security_rejects_unsigned_cookie_and_short_token(client):
     from cc_tmux_api.security import Security
 
     client.cookies.set("hq_device", "1.fake.signature")
     assert client.get("/api/auth").json()["authenticated"] is False
-    with pytest.raises(ValueError):
-        Security("", "https://hq.example.test")
+    assert Security("", "https://hq.example.test").public_url == "https://hq.example.test"
     with pytest.raises(ValueError):
         Security("too-short", "")
 
@@ -136,11 +135,12 @@ def test_bearer_auth_works_without_cookie(client):
     "https://hq.example.test/path", "https://hq.example.test?query=1",
     "https://hq.example.test#fragment",
 ])
-def test_remote_configuration_requires_an_https_origin(url):
+@pytest.mark.parametrize("token", ["", "test-pairing-key-with-at-least-32-characters"])
+def test_remote_configuration_requires_an_https_origin(url, token):
     from cc_tmux_api.security import Security
 
     with pytest.raises(ValueError, match="HTTPS origin"):
-        Security("test-pairing-key-with-at-least-32-characters", url)
+        Security(token, url)
 
 
 def test_legacy_worker_send_cannot_bypass_session_guards(client, monkeypatch):
@@ -299,3 +299,55 @@ def test_invalid_bind_endpoints_rejected(endpoint):
 
     with pytest.raises(ValueError):
         bind_address(endpoint, 8377)
+
+
+@pytest.fixture
+def public_noauth_client(monkeypatch, tmp_path):
+    monkeypatch.setenv('CC_TMUX_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('CC_TMUX_TOKEN', '')
+    monkeypatch.setenv('CC_TMUX_PUBLIC_URL', 'https://hq.example.test')
+    monkeypatch.setenv('CC_TMUX_MANAGE_WORKERS', '0')
+    from cc_tmux_api import fleet
+    from cc_tmux_api.server import create_app
+
+    monkeypatch.setattr(fleet, 'snapshot', lambda **kwargs: {'hosts': [], 'sessions': []})
+    # No lifespan or real tmux controls in these public-origin contract tests.
+    return TestClient(create_app(), base_url='https://hq.example.test')
+
+
+def test_public_https_without_token_allows_same_origin_reads_and_controls(public_noauth_client, monkeypatch):
+    from cc_tmux_api import fleet
+
+    calls = []
+    monkeypatch.setattr(fleet, 'act', lambda *args, **kwargs: calls.append((args, kwargs)) or {'ok': True})
+    client = public_noauth_client
+    assert client.get('/api/auth').json() == {'required': False, 'authenticated': True}
+    response = client.get('/api/sessions', headers={'Origin': 'https://hq.example.test'})
+    assert response.status_code == 200 and response.json()['sessions'] == []
+    assert response.headers['cache-control'] == 'no-store'
+    response = client.post('/api/sessions/opaque/action',
+        json={'action': 'key', 'key': 'Escape', 'revision': 'observed', 'request_id': 'request-public'},
+        headers={'Origin': 'https://hq.example.test', 'Sec-Fetch-Site': 'same-origin'})
+    assert response.status_code == 200 and response.json() == {'ok': True}
+    assert len(calls) == 1
+    assert calls[0][1]['revision'] == 'observed'
+    assert calls[0][1]['request_id'] == 'request-public'
+    assert not client.cookies
+
+
+@pytest.mark.parametrize('headers,expected', [
+    ({'Origin': 'https://other.example.test'}, 403),
+    ({'Origin': 'https://hq.example.test', 'Sec-Fetch-Site': 'cross-site'}, 403),
+    ({'Host': 'other.example.test'}, 400),
+    ({'Origin': 'https://hq.example.test', 'Content-Type': 'text/plain'}, 415),
+])
+def test_public_noauth_keeps_origin_host_and_json_guards(public_noauth_client, monkeypatch, headers, expected):
+    from cc_tmux_api import fleet
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('Rejected public request reached a session control')
+    monkeypatch.setattr(fleet, 'act', forbidden)
+    response = public_noauth_client.post('/api/sessions/opaque/action',
+        json={'action': 'key', 'key': 'Escape', 'revision': 'observed', 'request_id': 'request-public'},
+        headers=headers)
+    assert response.status_code == expected

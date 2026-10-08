@@ -1,4 +1,4 @@
-"""Same-origin, account-independent pairing for the existing HTTP service."""
+"""Same-origin controls with optional account-independent device pairing."""
 
 from __future__ import annotations
 
@@ -29,8 +29,6 @@ class Security:
             or parsed.password is not None or parsed.path or parsed.query or parsed.fragment
         ):
             raise ValueError("CC_TMUX_PUBLIC_URL must be an HTTPS origin")
-        if self.public_url and not token:
-            raise ValueError("Remote access requires CC_TMUX_TOKEN")
         self.hosts = {"localhost", "127.0.0.1", "::1"}
         self.hosts.update(name.strip() for name in os.environ.get("CC_TMUX_ALLOWED_HOSTS", "").split(",") if name.strip())
         if parsed.hostname:
