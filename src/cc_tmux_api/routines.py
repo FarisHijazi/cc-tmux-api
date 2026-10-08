@@ -17,7 +17,8 @@ empty and the server starts no scheduler loop.
 
 The files are the source of truth (toggling rewrites the `enabled:` line);
 the only state is last-run per routine in <dir>/.state.json.
-Overlap guard: a routine is skipped while its previous worker is alive.
+Overlap guard: a routine is skipped while its previous worker is alive
+(claude still in the pane; a finished one is cleared and respawned).
 """
 
 from __future__ import annotations
@@ -96,13 +97,28 @@ def _next_run(r: dict, last: float) -> float | None:
     return None
 
 
-def _alive_session(name: str, live: list[str] | None = None) -> str | None:
+def _session_of(name: str, live: list[str] | None = None) -> str | None:
+    """The tmux session of this routine's previous run, in ANY state."""
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     if live is None:
         live = [s["name"] for s in workers._sessions()]
     for n in live:
         if n.startswith(f"{workers.PREFIX}{slug}-"):
             return n
+    return None
+
+
+def _alive_session(name: str, live: list[str] | None = None) -> str | None:
+    """The previous run's session only while claude is still IN it.
+
+    A finished worker drops back to a shell but its tmux session stays until
+    reap_stale() gets to it (default 12h). Counting that as alive made every
+    routine faster than the reap interval run once and then be skipped on
+    every tick — found 2026-09-18 with a 2h routine that fired at 14:11 and
+    never again."""
+    s = _session_of(name, live)
+    if s and workers.status_of(s) != "done":
+        return s
     return None
 
 
@@ -169,8 +185,14 @@ def tick() -> list[str]:
         nxt = _next_run(r, st.get(r["name"], {}).get("last_run", 0))
         if nxt is None or nxt > now:
             continue
-        if _alive_session(r["name"]):  # previous run still working -> skip
-            continue
+        prev = _session_of(r["name"])
+        if prev:
+            if workers.status_of(prev) != "done":
+                continue  # previous run still working -> skip
+            # finished worker: disposable by design, and clearing it here (not
+            # waiting for reap_stale) keeps one session per routine instead of
+            # a -1, -2, -3 pile.
+            workers.kill(prev)
         workers.spawn(r["name"], r["prompt"], r.get("workdir"), kind="routine")
         st.setdefault(r["name"], {})["last_run"] = now
         spawned.append(r["name"])

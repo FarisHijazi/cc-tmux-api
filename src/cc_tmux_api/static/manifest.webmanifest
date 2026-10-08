@@ -1,0 +1,16 @@
+{
+  "id": "/",
+  "name": "HQ",
+  "short_name": "HQ",
+  "description": "Your sessions, within reach.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f7f8fa",
+  "theme_color": "#f7f8fa",
+  "icons": [
+    {"src": "/cc-static/icons/hq-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "/cc-static/icons/hq-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/cc-static/icons/hq.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
+  ]
+}

@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local agent transcripts and isolated checkouts
+.cc-convos/
+worktrees/
