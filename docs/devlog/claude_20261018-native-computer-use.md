@@ -102,3 +102,19 @@ not desktop execution. Evidence is under private runtime
 `deployed-native-regression/`. Both services returned healthy session/auth APIs,
 all configured peers remained available, native unauthenticated registration
 returned 401, and the public authentication gate still returned 302.
+
+## Real CLI never forwards this dialog (2.1.302, verified later the same day)
+
+With a full Max login (see the account proxy's
+`docs/devlog/claude_20261018-personal-full-login-live-checks.md`), a real
+interactive session through HQ Remote Control listed and enabled `computer-use`,
+and `request_access` raised the native consent dialog. The dialog showed **only
+in the terminal**. HQ recorded no pending request, even though its
+`initialize` declaration had been accepted.
+
+Cause, read from the 2.1.302 binary: the REPL bridge forwards a
+`request_user_dialog` only when `i_n(kind, "remote_control")` allows it, and that
+allowlist holds just `refusal_fallback_prompt` and `fable_overage_consent_prompt`.
+`computer_use_approval` is therefore local-only in interactive sessions. HQ's
+consent UI stays correct but unused until a CLI release adds the kind to that lane;
+re-check `i_n` after upgrading Claude Code before relying on it.
