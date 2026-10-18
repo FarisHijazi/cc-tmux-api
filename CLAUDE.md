@@ -7,3 +7,5 @@ These are deliberately plain links, not automatic includes.
 For runtime launch/configuration, use [README.md](README.md#native-remote-control)
 and preserve the existing production service and HTTPS owners.
 Native launch keys are private runtime files; never place their values in docs.
+Computer-use protocol support and its account/OS validation limits are recorded
+in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).

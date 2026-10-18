@@ -241,7 +241,35 @@ function Question({ id, menu, tail, disabled, act }) {
     <div class="actions"><button disabled=${disabled} onClick=${() => act('key', {key:'Escape'})}>Cancel</button>${(review || menu.multi_select || free) && html`<button class="primary" disabled=${disabled || (free && (!hasInserted || !!answer.trim())) || (!review && !free && !submitOption)} onClick=${confirm}>${review ? 'Submit answer' : free ? 'Confirm typed answer' : 'Continue'}</button>`}</div>
   </section>`;
 }
+function ComputerUseControl({ control, disabled, act }) {
+  const request = control.input || {};
+  const apps = Array.isArray(request.apps) ? request.apps : [];
+  const [selected, setSelected] = useState([]);
+  const [flags, setFlags] = useState({clipboardRead:false, clipboardWrite:false, systemKeyCombos:false});
+  const flagLabels = {clipboardRead:'Read clipboard', clipboardWrite:'Write clipboard', systemKeyCombos:'Use system key combinations'};
+  const tiers = {read:'View only', click:'Click only', full:'Full app control'};
+  const tcc = request.tccState;
+  const respond = behavior => act('respond', {response:{
+    request_id:control.request_id, behavior,
+    ...(behavior === 'completed' && !tcc ? {granted_app_ids:selected, flags} : {}),
+  }});
+  return html`<section class="question-card native-control" aria-label="Computer use permission"><div class="question-label">Permission required<span>Computer use</span></div><h3>${tcc ? 'macOS permissions required' : 'Choose apps Claude may control'}</h3>
+    ${request.reason && html`<p>${request.reason}</p>`}
+    ${tcc ? html`<p>Grant the missing permissions on the Mac running this session, then try again.</p><ul><li>Accessibility: ${tcc.accessibility ? 'Granted' : 'Not granted'}</li><li>Screen Recording: ${tcc.screenRecording ? 'Granted' : 'Not granted'}</li></ul><p>Open System Settings → Privacy & Security. macOS may require restarting Claude after Screen Recording is granted.</p>` : html`
+      <fieldset disabled=${disabled}><legend>Apps for this session</legend><div class="question-options">${apps.map(app => {
+        const resolved = app.resolved;
+        const checked = !!resolved && (app.alreadyGranted || selected.includes(resolved.bundleId));
+        return html`<label class="question-option ${checked ? 'chosen' : ''}"><input type="checkbox" disabled=${!resolved || !!app.alreadyGranted} checked=${checked} onChange=${event => setSelected(event.currentTarget.checked ? [...selected, resolved.bundleId] : selected.filter(id => id !== resolved.bundleId))}/><span><strong>${resolved?.displayName || app.requestedName}</strong><small>${!resolved ? 'Not installed · cannot approve' : app.alreadyGranted ? 'Already approved for this session' : tiers[app.proposedTier] || 'App access'}</small></span></label>`;
+      })}</div></fieldset>
+      ${Object.entries(flagLabels).some(([key]) => request.requestedFlags?.[key]) && html`<fieldset disabled=${disabled}><legend>Additional access</legend><div class="question-options">${Object.entries(flagLabels).filter(([key]) => request.requestedFlags?.[key]).map(([key, label]) => html`<label class="question-option"><input type="checkbox" checked=${flags[key]} onChange=${event => setFlags({...flags, [key]:event.currentTarget.checked})}/><span>${label}</span></label>`)}</div></fieldset>`}
+      ${request.willHide?.length > 0 && html`<p>Other apps will be hidden while Claude works and restored afterward.</p>`}
+      <p>New access lasts for this Claude session. Press Esc on the Mac to stop computer use.</p>`}
+    <div class="actions"><button disabled=${disabled} onClick=${() => respond('cancelled')}>Cancel</button><button class="primary" disabled=${disabled || (!tcc && selected.length === 0 && !apps.some(app => app.alreadyGranted && app.resolved) && !Object.values(flags).some(Boolean))} onClick=${() => respond('completed')}>${tcc ? 'Try again' : 'Allow selected'}</button></div></section>`;
+}
 function NativeControl({ id, control, disabled, act }) {
+  if (control.subtype === 'request_user_dialog') return control.dialog_kind === 'computer_use_approval'
+    ? html`<${ComputerUseControl} key=${control.request_id} control=${control} disabled=${disabled} act=${act}/>`
+    : html`<p class="read-only-note">This request needs an answer in the Claude terminal.</p>`;
   const questions = control.tool_name === 'AskUserQuestion' && Array.isArray(control.input?.questions) ? control.input.questions : [];
   const draftId = `${id}:native:${control.request_id}`;
   const [answers, setAnswers] = useState(() => {

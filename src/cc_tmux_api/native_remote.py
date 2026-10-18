@@ -31,6 +31,8 @@ MAX_QUEUE_BYTES = 1024 * 1024
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
 MAX_METADATA_BYTES = 256 * 1024
 MAX_PENDING_BYTES = 512 * 1024
+COMPUTER_USE_DIALOG = "computer_use_approval"
+COMPUTER_USE_FLAGS = ("clipboardRead", "clipboardWrite", "systemKeyCombos")
 
 
 def _size(value):
@@ -55,6 +57,7 @@ class NativeRemote:
         self._token = token
         self._lock = threading.RLock()
         self._streams = {}
+        self._computer_use_dialogs = False
         self._path = Path(state_dir) / "native-remote.json"
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._sessions = {}
@@ -63,6 +66,36 @@ class NativeRemote:
             if data.get("version") != 1 or not isinstance(data.get("sessions"), dict):
                 raise ValueError("Invalid native Remote Control state")
             self._sessions = data["sessions"]
+
+    def enable_computer_use_dialogs(self):
+        """Call only from a host whose UI can render and answer this consent dialog."""
+        with self._lock:
+            self._computer_use_dialogs = True
+            for session in self._sessions.values():
+                if self._row(session, detail=False)["alive"]:
+                    self._declare_dialogs(session)
+
+    def _declare_dialogs(self, session):
+        if (
+            not self._computer_use_dialogs
+            or session.get("dialog_declaration_epoch") == session["epoch"]
+        ):
+            return
+        request_id = str(uuid4())
+        self._queue(
+            session,
+            {
+                "type": "control_request",
+                "request_id": request_id,
+                "request": {
+                    "subtype": "initialize",
+                    "supportedDialogKinds": [COMPUTER_USE_DIALOG],
+                },
+            },
+        )
+        session["dialog_declaration_epoch"] = session["epoch"]
+        session["dialog_declaration_request_id"] = request_id
+        self._save()
 
     def _save(self):
         temporary = self._path.with_suffix(".tmp")
@@ -268,7 +301,9 @@ class NativeRemote:
                 ):
                     raise FleetError("Native permission request is stale", 409)
                 behavior = response.get("behavior")
-                if behavior == "allow":
+                if pending.get("subtype") == "request_user_dialog":
+                    answer = self._dialog_answer(pending, response)
+                elif behavior == "allow":
                     updated = response.get("updated_input", pending.get("input", {}))
                     if not isinstance(updated, dict):
                         raise FleetError("updatedInput must be an object", 400)
@@ -301,6 +336,70 @@ class NativeRemote:
                 sequence_num=event["sequence_num"],
                 revision=str(session["revision"]),
             )
+
+    @staticmethod
+    def _dialog_answer(pending, response):
+        from .fleet import FleetError
+
+        if pending.get("dialog_kind") != COMPUTER_USE_DIALOG:
+            raise FleetError("Unsupported native dialog", 400)
+        if response.get("behavior") == "cancelled":
+            return {"behavior": "cancelled"}
+        if response.get("behavior") != "completed":
+            raise FleetError("Native dialog behavior must be completed or cancelled", 400)
+        request = pending["input"]
+        selected = response.get("granted_app_ids", [])
+        flags = response.get("flags", {})
+        if (
+            not isinstance(selected, list)
+            or any(not isinstance(value, str) for value in selected)
+            or len(set(selected)) != len(selected)
+            or not isinstance(flags, dict)
+            or any(
+                key not in COMPUTER_USE_FLAGS or type(value) is not bool
+                for key, value in flags.items()
+            )
+        ):
+            raise FleetError("Invalid computer-use selections", 400)
+        apps = request.get("apps", [])
+        eligible = {
+            app["resolved"]["bundleId"]: app
+            for app in apps
+            if app.get("resolved") and not app.get("alreadyGranted")
+        }
+        if set(selected) - eligible.keys() or any(
+            value and request.get("requestedFlags", {}).get(key) is not True
+            for key, value in flags.items()
+        ):
+            raise FleetError("Cannot grant an unrequested app or permission", 400)
+        if request.get("tccState") is not None and (selected or any(flags.values())):
+            raise FleetError("macOS permissions require approval on the host", 400)
+        granted = []
+        for bundle_id in selected:
+            app = eligible[bundle_id]
+            grant = dict(
+                bundleId=bundle_id,
+                displayName=app["resolved"]["displayName"],
+                grantedAt=int(time.time() * 1000),
+            )
+            if app.get("proposedTier") is not None:
+                grant["tier"] = app["proposedTier"]
+            granted.append(grant)
+        denied = []
+        for app in apps:
+            resolved = app.get("resolved")
+            if not resolved:
+                denied.append({"bundleId": app["requestedName"], "reason": "not_installed"})
+            elif not app.get("alreadyGranted") and resolved["bundleId"] not in selected:
+                denied.append({"bundleId": resolved["bundleId"], "reason": "user_denied"})
+        return {
+            "behavior": "completed",
+            "result": {
+                "granted": granted,
+                "denied": denied,
+                "flags": {key: flags.get(key, False) for key in COMPUTER_USE_FLAGS},
+            },
+        }
 
     def _message(self, session, payload):
         role = payload.get("type")
@@ -358,13 +457,89 @@ class NativeRemote:
                 or not isinstance(request.get("tool_name"), str)
             ):
                 return False
+            if request.get("subtype") == "request_user_dialog":
+                if not isinstance(request.get("dialog_kind"), str) or not isinstance(
+                    request.get("payload"), dict
+                ):
+                    return False
+                if request[
+                    "dialog_kind"
+                ] == COMPUTER_USE_DIALOG and not NativeRemote._valid_computer_use(
+                    request["payload"]
+                ):
+                    return False
         if kind == "control_response":
             response = payload.get("response")
             if not isinstance(response, dict) or not isinstance(response.get("request_id"), str):
                 return False
+            for key in ("pending_permission_requests", "pending_user_dialog_requests"):
+                if key not in response:
+                    continue
+                requests = response[key]
+                if (
+                    not isinstance(requests, list)
+                    or len(requests) > 64
+                    or any(
+                        not isinstance(item, dict)
+                        or item.get("type") != "control_request"
+                        or not NativeRemote._valid_payload(item)
+                        for item in requests
+                    )
+                ):
+                    return False
         if kind == "control_cancel_request" and not isinstance(payload.get("request_id"), str):
             return False
         return True
+
+    @staticmethod
+    def _valid_computer_use(value):
+        apps, flags = value.get("apps"), value.get("requestedFlags")
+        if not isinstance(apps, list) or not isinstance(flags, dict):
+            return False
+        if any(type(flag) is not bool for flag in flags.values()):
+            return False
+        tcc = value.get("tccState")
+        if tcc is not None and (
+            not isinstance(tcc, dict)
+            or any(type(tcc.get(key)) is not bool for key in ("accessibility", "screenRecording"))
+        ):
+            return False
+        seen = set()
+        for app in apps:
+            if not isinstance(app, dict) or not isinstance(app.get("requestedName"), str):
+                return False
+            if "alreadyGranted" in app and type(app["alreadyGranted"]) is not bool:
+                return False
+            if app.get("proposedTier") not in (None, "read", "click", "full"):
+                return False
+            resolved = app.get("resolved")
+            if resolved is not None:
+                if not isinstance(resolved, dict) or any(
+                    not isinstance(resolved.get(key), str) or not resolved[key]
+                    for key in ("bundleId", "displayName")
+                ):
+                    return False
+                if resolved["bundleId"] in seen:
+                    return False
+                seen.add(resolved["bundleId"])
+        return True
+
+    @staticmethod
+    def _supported_request(request):
+        return request.get("subtype") == "can_use_tool" or (
+            request.get("subtype") == "request_user_dialog"
+            and request.get("dialog_kind") == COMPUTER_USE_DIALOG
+        )
+
+    def _incoming_requests(self, session, payload):
+        requests = [payload] if payload.get("type") == "control_request" else []
+        if payload.get("type") == "control_response":
+            response = payload["response"]
+            if response["request_id"] == session.get("dialog_declaration_request_id"):
+                requests = response.get("pending_permission_requests", []) + response.get(
+                    "pending_user_dialog_requests", []
+                )
+        return [item for item in requests if self._supported_request(item["request"])]
 
     @staticmethod
     def _event_identity(item):
@@ -382,19 +557,22 @@ class NativeRemote:
             return
         self._message(session, payload)
         kind = payload.get("type")
-        if kind == "control_request":
-            request = payload.get("request", {})
-            if not isinstance(request, dict):
-                return
-            if request.get("subtype") == "can_use_tool" and isinstance(
-                payload.get("request_id"), str
-            ):
-                self._pending(session)[payload["request_id"]] = dict(
-                    request_id=payload["request_id"],
-                    tool_name=request.get("tool_name", ""),
-                    input=request.get("input", {}),
-                )
-        elif kind == "control_response":
+        for incoming in self._incoming_requests(session, payload):
+            request = incoming["request"]
+            self._pending(session)[incoming["request_id"]] = dict(
+                request_id=incoming["request_id"],
+                tool_name=request.get("tool_name", "Computer use"),
+                input=request.get("payload", {})
+                if request.get("subtype") == "request_user_dialog"
+                else request.get("input", {}),
+                subtype=request["subtype"],
+                **(
+                    {"dialog_kind": request["dialog_kind"]}
+                    if request.get("subtype") == "request_user_dialog"
+                    else {}
+                ),
+            )
+        if kind == "control_response":
             self._pending(session).pop(payload["response"]["request_id"], None)
         elif kind == "control_cancel_request":
             self._pending(session).pop(payload.get("request_id"), None)
@@ -509,6 +687,7 @@ class NativeRemote:
             self.replay(sid, cursor)
             lease = {"epoch": epoch, "id": str(uuid4())}
             with self._lock:
+                self._declare_dialogs(session)
                 self._streams[sid] = lease
                 self._touch(session)
 
@@ -602,13 +781,12 @@ class NativeRemote:
                         if self._event_identity(item) in seen:
                             continue
                         payload = item["payload"]
-                        if (
-                            payload.get("type") == "control_request"
-                            and payload["request"].get("subtype") == "can_use_tool"
-                        ):
-                            pending[payload["request_id"]] = payload
-                        elif payload.get("type") == "control_cancel_request":
+                        for incoming in self._incoming_requests(session, payload):
+                            pending[incoming["request_id"]] = incoming
+                        if payload.get("type") == "control_cancel_request":
                             pending.pop(payload["request_id"], None)
+                        elif payload.get("type") == "control_response":
+                            pending.pop(payload["response"]["request_id"], None)
                     if len(pending) > 64 or _size(pending) > MAX_PENDING_BYTES:
                         raise HTTPException(413, "Too many pending native permissions")
                     results = []

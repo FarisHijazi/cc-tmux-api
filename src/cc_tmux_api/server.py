@@ -192,6 +192,7 @@ def create_app() -> FastAPI:
     app.middleware("http")(security.middleware)
     native = fleet.native_backend()
     if native is not None:
+        native.enable_computer_use_dialogs()
         app.include_router(native.router())
 
     @app.exception_handler(fleet.FleetError)

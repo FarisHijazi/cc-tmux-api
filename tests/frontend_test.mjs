@@ -496,6 +496,53 @@ try {
     assert.equal(actions.at(-1).response.behavior,'deny');
     assert.equal(actions.at(-1).response.request_id,'permission-2');
     assert.equal(actions.at(-1).response.updated_input,undefined);
+    const cuRequest = {apps:[
+      {requestedName:'Example Editor',resolved:{bundleId:'org.example.editor',displayName:'Example Editor'},alreadyGranted:false,proposedTier:'full'},
+      {requestedName:'Example Browser',resolved:{bundleId:'org.example.browser',displayName:'Example Browser'},alreadyGranted:false,proposedTier:'read'},
+      {requestedName:'Missing App',resolved:null,alreadyGranted:false},
+    ],requestedFlags:{clipboardRead:true,clipboardWrite:true},reason:'Inspect the test document',willHide:['Other App']};
+    nativeSession.native_control = {request_id:'computer-1',subtype:'request_user_dialog',dialog_kind:'computer_use_approval',tool_name:'Computer use',input:cuRequest};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    const cu = page.getByRole('region',{name:'Computer use permission',exact:true});
+    await cu.waitFor();
+    assert.equal(await cu.getByRole('button',{name:'Allow selected',exact:true}).isDisabled(),true,'New computer access requires explicit selection');
+    assert.equal(await cu.getByRole('checkbox',{name:'Missing App Not installed · cannot approve',exact:true}).isDisabled(),true);
+    assert.equal(await cu.getByRole('checkbox',{name:'Use system key combinations',exact:true}).count(),0,'Unrequested access must not be offered');
+    await page.getByRole('button',{name:'Draft a message',exact:false}).click();
+    assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+    await cu.getByRole('checkbox',{name:'Example Editor Full app control',exact:true}).check();
+    await cu.getByRole('checkbox',{name:'Read clipboard',exact:true}).check();
+    failAction = true;
+    const beforeCuFailure = actionCount;
+    await cu.getByRole('button',{name:'Allow selected',exact:true}).click();
+    await page.locator('.detail .error').filter({hasText:'Nothing will be retried automatically'}).waitFor();
+    assert.equal(actionCount,beforeCuFailure + 1);
+    assert.equal(await cu.getByRole('checkbox',{name:'Example Editor Full app control',exact:true}).isChecked(),true);
+    failAction = false;
+    await cu.getByRole('button',{name:'Allow selected',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.deepEqual(actions.at(-1).response,{request_id:'computer-1',behavior:'completed',granted_app_ids:['org.example.editor'],flags:{clipboardRead:true,clipboardWrite:false,systemKeyCombos:false}});
+    nativeSession.native_control = {request_id:'computer-2',subtype:'request_user_dialog',dialog_kind:'computer_use_approval',tool_name:'Computer use',input:cuRequest};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    await cu.getByRole('button',{name:'Cancel',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.deepEqual(actions.at(-1).response,{request_id:'computer-2',behavior:'cancelled'});
+    nativeSession.native_control = {request_id:'computer-existing',subtype:'request_user_dialog',dialog_kind:'computer_use_approval',tool_name:'Computer use',input:{apps:[{...cuRequest.apps[0],alreadyGranted:true}],requestedFlags:{}}};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    const previouslyApproved = cu.getByRole('checkbox',{name:'Example Editor Already approved for this session',exact:true});
+    assert.equal(await previouslyApproved.isChecked(),true);
+    assert.equal(await previouslyApproved.isDisabled(),true,'Existing session grants are not revocable through this approval');
+    await cu.getByRole('button',{name:'Allow selected',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.deepEqual(actions.at(-1).response.granted_app_ids,[],'Previously granted apps must not be resubmitted as new grants');
+    nativeSession.native_control = {request_id:'computer-tcc',subtype:'request_user_dialog',dialog_kind:'computer_use_approval',tool_name:'Computer use',input:{apps:[],requestedFlags:{},tccState:{accessibility:false,screenRecording:true}}};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    await cu.getByRole('heading',{name:'macOS permissions required',exact:true}).waitFor();
+    assert.equal(await cu.getByRole('checkbox').count(),0,'OS permissions cannot be granted through browser controls');
+    await cu.getByText('Accessibility: Not granted',{exact:true}).waitFor();
+    await cu.getByRole('button',{name:'Try again',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.deepEqual(actions.at(-1).response,{request_id:'computer-tcc',behavior:'completed'});
     console.log(`PASS ${width}px: existing HQ contracts and native permission/answers, capability gating, interrupt, drafts, failed-send retention`);
     await context.close();
   }

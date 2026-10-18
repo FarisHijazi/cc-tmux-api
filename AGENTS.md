@@ -62,6 +62,10 @@ Existing ownership boundaries:
   `CC_TMUX_NATIVE_ONLY=1` excludes tmux, SSH and peer discovery for isolated tests.
   Mac and ftower native ingress/aggregation now run 0.5.0; production
   federation was verified with a new interactive session and real browser input.
+  `computer_use_approval` uses native `request_user_dialog` and explicit app/flag
+  consent, not generic tool allow/deny. Advertise only supported dialog kinds;
+  keep Pro/Max eligibility, OS permissions and prior session grants intact. Read
+  `docs/devlog/claude_20261018-native-computer-use.md` on demand (plain path).
 - `src/cc_tmux_api/workers.py` owns the unattended worker namespace and its revival
   and reaping. Preserve the imported routine rescheduling and worker `; exit`
   behavior; see README for the contract. Ordinary interactive sessions must not

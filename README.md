@@ -21,7 +21,7 @@ reads, real-browser lifecycle checks, and review-card visual verification passed
 The fresh owned remote menu batch passed all nine actions and native completion;
 earlier two-relay cascade checks also passed. Exact build, listener, process and state
 ownership is recorded in the [current deployment report](docs/devlog/claude_20261008-federated-hq-lifecycle.md#verified-deployment-current-state).
-The persistent homelab aggregator runs 0.4.3 and connects directly to all four
+The persistent homelab aggregator connects directly to all four
 peers, including the now-local-only Mac HQ. Public HTTPS deployment and current
 verification are tracked in [the ftower deployment log](docs/devlog/claude_20261008-ftower-deployment.md).
 Its earlier authentication state is superseded by the live Authentik route,
@@ -39,8 +39,8 @@ HQ dashboard. Sessions groups existing Claude panes by host or directory, with
 search, attention filtering, conversation/terminal views, and guarded controls.
 Workers and Routines retain the unattended workflow described below;
 `#w-<session>` opens a worker card. Fleet links use `/#session=<encoded-id>`.
-This checkout is version 0.5.0; the upstream `uvx` command
-above uses the published repository, not necessarily these uncommitted changes.
+This checkout is version 0.5.1; the upstream `uvx` command
+above uses the published repository, not necessarily this checkout.
 
 For Anthropic-hosted `claude.ai/code/session_…` links per worker, enable remote
 control by default: inside any Claude Code session run `/config` and set
@@ -86,6 +86,26 @@ state is private under `CC_TMUX_STATE_DIR/native`; lifecycle summaries continue
 to belong to the shared session-history store.
 
 See [protocol research, tests and deployment evidence](docs/devlog/claude_20261018-native-remote-control.md).
+
+### Native computer use
+
+HQ supports the native computer-use app-approval dialog: select apps and any
+requested clipboard/key access, or cancel without granting new access. Existing
+session approvals remain in force. Missing macOS permissions are shown with a
+retry action; the browser cannot grant operating-system permissions.
+
+Anthropic currently requires an interactive macOS session with a full Pro/Max
+claude.ai login. Enable the built-in `computer-use` server through `/mcp` in the
+isolated CLI session. Team/Enterprise plans are not eligible. Accessibility and
+Screen Recording permissions must be granted on the Mac hosting Claude.
+See [Anthropic's requirements](https://code.claude.com/docs/en/computer-use).
+
+This adds approval transport; HQ's transcript remains text-only and does not
+display computer-use screenshots. The existing inference proxy handles image
+tool results for models that support them. Actual desktop interaction still
+requires an eligible account and OS permissions; protocol/UI tests alone do not
+establish that it works on a particular machine. See
+[computer-use validation](docs/devlog/claude_20261018-native-computer-use.md).
 
 ## Worker API
 
