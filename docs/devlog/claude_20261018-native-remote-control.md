@@ -117,3 +117,56 @@ nine conversation messages remained unchanged across that restart.
 Private browser evidence is under `tmp/cchq-native-preview/browser-evidence/`:
 `native-e2e-final`, `native-permissions` and `reconnect-result.json`. These are
 runtime artifacts outside the repository and contain actual session values.
+
+## Deployment and installed launcher
+
+The Mac root checkout was fast-forwarded to `181e02c` and synchronized with
+`uv sync --locked`. The existing `com.local.cc-tmux-hq` launchagent was restarted
+with its existing config. A separate 0600 registration key is stored at
+`~/.config/cc-tmux-api/native-token`; only `CC_TMUX_NATIVE_TOKEN` was added to
+the private config. Other settings and legacy session discovery remain enabled.
+The config backup is `~/.config/cc-tmux-api/hq.before-native-20261018.json`.
+
+The paired model-proxy checkout was fast-forwarded to `a7fa286`. The local
+`~/.local/bin/claude-hq` shortcut delegates to the existing account launcher,
+starts a private inference router, reads an access-only snapshot of the current
+Claude login, and selects the Mac native backend. Example:
+
+```sh
+claude-hq -- --model gpt-5.6-sol
+```
+
+No files in the source Claude login directory were modified. Both isolated live
+test CLIs exited normally; the existing inference router was never restarted.
+
+The ftower aggregator uses immutable wheel release
+`00c8cbd7d9008e288e7dbe00914d645e11a1f97e7232343c90e1cec5bf11a6cf`
+under `~/.local/share/cc-tmux-api/releases/`. Dependencies were hash-locked and
+checked before restarting only `cc-tmux-hq.service`. Its source unit remains
+`/home/faris/media-server/compose/cchq/cc-tmux-hq.service`; the prior unit/config
+backups have suffix `.before-native-20261018`. The previous `521d2afa…` release
+remains available for rollback. No peer, HTTPS or identity-provider setting changed.
+ftower also has its own 0600 `~/.config/cc-tmux-api/native-token` and matching
+`CC_TMUX_NATIVE_TOKEN` config entry, enabling authenticated local native ingress;
+federation itself does not require this launch secret.
+
+Real Chrome opened the deployed ftower UI over a private SSH tunnel, found the
+Mac session through `host_path=[macbook,@native]`, sent exactly one prompt and
+rendered the completed `HQ_DEPLOYED` response at 390 px and 1440 px. The actual
+CLI independently displayed the same prompt and response. No terminal tab,
+horizontal overflow or browser errors were observed. Evidence is
+`browser-evidence/deployed-federation/report.json` and its two screenshots in
+the private preview directory. Both services returned healthy API responses;
+unauthenticated native registration returned 401. The public hostname's `/`
+and `/api/auth` still redirect to Authentik (302). Authenticated public browser
+access was not re-tested; private federation and the public authentication gate
+were checked separately.
+After the test CLI exited, the federated record became ended with every control
+disabled while retaining the response. The temporary preview process and exact
+owned SSH forward were removed; the pre-existing SSH master was preserved.
+Final runtime evidence is `tmp/cchq-native-preview/deployment/result.json`.
+
+For rollback, restore the previous ftower unit and restart that service after
+`daemon-reload`; preserve its persistent state. On the Mac, restore the config
+backup and select the previous verified checkout/release before restarting the
+same launchagent. Restoring config alone does not roll back application code.

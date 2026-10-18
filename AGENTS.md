@@ -59,7 +59,9 @@ Existing ownership boundaries:
   aligned with the tested CLI. Native routes require their separate launch or
   worker credential even when browser pairing is disabled. Read
   `docs/devlog/claude_20261018-native-remote-control.md` on demand (plain path).
-  `CC_TMUX_NATIVE_ONLY=1` excludes terminal discovery for isolated live tests.
+  `CC_TMUX_NATIVE_ONLY=1` excludes tmux, SSH and peer discovery for isolated tests.
+  Mac and ftower native ingress/aggregation now run 0.5.0; production
+  federation was verified with a new interactive session and real browser input.
 - `src/cc_tmux_api/workers.py` owns the unattended worker namespace and its revival
   and reaping. Preserve the imported routine rescheduling and worker `; exit`
   behavior; see README for the contract. Ordinary interactive sessions must not
