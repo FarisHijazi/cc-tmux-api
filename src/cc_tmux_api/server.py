@@ -151,12 +151,13 @@ class Oneshot(BaseModel):
 
 
 class SessionAction(BaseModel):
-    action: Literal["send", "key", "type", "select", "submit"]
+    action: Literal["send", "key", "type", "select", "submit", "respond", "interrupt"]
     revision: str = Field(min_length=1, max_length=256)
     request_id: str = Field(min_length=8, max_length=128)
     text: str | None = Field(default=None, max_length=32000)
     key: str | None = Field(default=None, max_length=16)
     index: int | None = Field(default=None, ge=0, le=50)
+    response: dict | None = None
 
 
 class Pairing(BaseModel):
@@ -189,6 +190,9 @@ def create_app() -> FastAPI:
         state_dir, os.environ.get("CC_TMUX_VAPID_SUBJECT", security.public_url)
     )
     app.middleware("http")(security.middleware)
+    native = fleet.native_backend()
+    if native is not None:
+        app.include_router(native.router())
 
     @app.exception_handler(fleet.FleetError)
     async def fleet_error(request: Request, exc: fleet.FleetError):
@@ -376,7 +380,10 @@ def main(app_spec: str | None = None) -> None:
             listener.bind((address, bind_port))
             listener.listen(128)
             listener.setblocking(False)
-        uvicorn.Server(uvicorn.Config(app_spec or app, port=port)).run(sockets=listeners)
+        # Native SSE connections are intentionally long-lived; bound service restarts.
+        uvicorn.Server(uvicorn.Config(
+            app_spec or app, port=port, timeout_graceful_shutdown=5,
+        )).run(sockets=listeners)
     finally:
         for listener in listeners:
             listener.close()

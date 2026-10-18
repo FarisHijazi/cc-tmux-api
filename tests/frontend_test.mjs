@@ -70,6 +70,10 @@ try {
         if (failAction) return route.fulfill({ status:409, json:{detail:'Session changed'} });
         const action = actions.at(-1);
         assert.equal(action.revision, String(revision));
+        if (action.action === 'respond') {
+          const targetId = decodeURIComponent(url.pathname.slice('/api/sessions/'.length, -'/action'.length));
+          delete extraSessions.find(s => s.id === targetId).native_control;
+        }
         revision++;
         if (action.action === 'select') {
           menu.focused_index = action.index;
@@ -429,7 +433,70 @@ try {
       await page.getByText('Notifications are unavailable over HTTP. Sessions and controls still work.',{exact:true}).waitFor();
       assert.equal(await page.getByRole('button',{name:'Enable notifications',exact:true}).count(),0);
     }
-    console.log(`PASS ${width}px: lifecycle/attention filters, offline versus ended/read-only/history, honest loading/unavailable counts, sanitized Markdown, menu controls, HTTP UUIDs, drafts, guarded worker sends, error/no retry`);
+    failAction = false;
+    const nativeSession = {...session, id:'native/session', transport:'native', title:'Native session', lifecycle:'alive', alive:true, menu:null,
+      native_control:{request_id:'permission-1',tool_name:'Read',input:{file_path:'/workspace/example.txt'}}};
+    extraSessions = [nativeSession];
+    await page.getByRole('button',{name:'Sessions',exact:true}).click();
+    await page.evaluate(() => {location.hash = 'session=native%2Fsession';});
+    await page.getByRole('region',{name:'Tool permission'}).waitFor();
+    assert.equal(await page.getByRole('tab',{name:'Terminal',exact:true}).count(),0);
+    assert.equal(await page.getByText('Keyboard controls',{exact:true}).count(),0);
+    assert.equal(await page.getByRole('button',{name:'Open terminal',exact:true}).count(),0);
+    await page.getByRole('button',{name:'Draft a message',exact:false}).click();
+    await page.getByRole('textbox',{name:'Message this session',exact:true}).fill('Keep this native draft');
+    assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+    await page.getByRole('button',{name:'Allow',exact:true}).click();
+    await page.getByRole('button',{name:'Send message',exact:true}).waitFor();
+    assert.deepEqual(actions.at(-1).response,{request_id:'permission-1',behavior:'allow',updated_input:{file_path:'/workspace/example.txt'}});
+    assert.equal(actions.at(-1).action,'respond');
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.equal(await page.getByRole('textbox',{name:'Message this session',exact:true}).inputValue(),'Keep this native draft');
+    await page.getByRole('button',{name:'Send message',exact:true}).click();
+    await page.waitForFunction(() => document.querySelector('#reply').value === '');
+    assert.equal(actions.at(-1).text,'Keep this native draft');
+    await page.getByRole('button',{name:'Interrupt',exact:true}).click();
+    await page.getByRole('button',{name:'Confirm interrupt',exact:true}).click();
+    await page.getByText('Control sent. Screen refreshed.',{exact:true}).waitFor();
+    assert.equal(actions.at(-1).action,'interrupt');
+    assert.equal(actions.at(-1).key,undefined);
+    nativeSession.native_control = {request_id:'question-1',tool_name:'AskUserQuestion',input:{questions:[
+      {question:'Which mode?',header:'Mode',options:[{label:'Fast',description:'Short run'},{label:'Thorough',description:'Full run'}],multiSelect:false},
+      {question:'Which checks?',header:'Checks',options:[{label:'Unit',description:'Local checks'},{label:'Browser',description:'UI checks'}],multiSelect:true},
+    ]}};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    const nativeQuestions = page.getByRole('region',{name:'Pending questions'});
+    await nativeQuestions.waitFor();
+    assert.equal(await nativeQuestions.getByRole('button',{name:'Submit answers',exact:true}).isDisabled(),true);
+    await nativeQuestions.getByRole('radio',{name:'Fast Short run'}).check();
+    await nativeQuestions.getByRole('textbox',{name:'Custom answer',exact:true}).fill('Balanced');
+    assert.equal(await nativeQuestions.getByRole('radio',{name:'Fast Short run'}).isChecked(),false,'Custom single answer replaces radio choice');
+    await nativeQuestions.getByRole('checkbox',{name:'Unit Local checks'}).check();
+    await nativeQuestions.getByRole('checkbox',{name:'Browser UI checks'}).check();
+    await nativeQuestions.getByRole('textbox',{name:'Additional answer',exact:true}).fill('Integration');
+    failAction = true;
+    const beforeNativeFailure = actionCount;
+    await nativeQuestions.getByRole('button',{name:'Submit answers',exact:true}).click();
+    await page.locator('.detail .error').filter({hasText:'Nothing will be retried automatically'}).waitFor();
+    assert.equal(actionCount,beforeNativeFailure + 1);
+    assert.equal(await nativeQuestions.getByRole('textbox',{name:'Custom answer',exact:true}).inputValue(),'Balanced');
+    await page.reload();
+    await page.getByRole('region',{name:'Pending questions'}).waitFor();
+    assert.equal(await nativeQuestions.getByRole('textbox',{name:'Additional answer',exact:true}).inputValue(),'Integration','Native answer drafts survive reload and failed delivery');
+    failAction = false;
+    await nativeQuestions.getByRole('button',{name:'Submit answers',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.deepEqual(actions.at(-1).response.updated_input.answers,{'Which mode?':'Balanced','Which checks?':'Unit, Browser, Integration'});
+    assert.equal(actions.at(-1).response.updated_input.questions.length,2);
+    assert.equal(actions.at(-1).response.request_id,'question-1');
+    nativeSession.native_control = {request_id:'permission-2',tool_name:'Bash',input:{command:'pwd'}};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    await page.getByRole('button',{name:'Deny',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.equal(actions.at(-1).response.behavior,'deny');
+    assert.equal(actions.at(-1).response.request_id,'permission-2');
+    assert.equal(actions.at(-1).response.updated_input,undefined);
+    console.log(`PASS ${width}px: existing HQ contracts and native permission/answers, capability gating, interrupt, drafts, failed-send retention`);
     await context.close();
   }
   assert.deepEqual(failures,[]);

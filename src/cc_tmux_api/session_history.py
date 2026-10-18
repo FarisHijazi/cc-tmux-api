@@ -34,7 +34,7 @@ from contextlib import closing
 from pathlib import Path
 
 RETENTION_SECONDS = 30 * 24 * 60 * 60
-_TRANSIENT = {"tail", "messages", "menu", "control", "revision"}
+_TRANSIENT = {"tail", "messages", "menu", "control", "revision", "native_control"}
 
 
 class SessionHistory:
@@ -74,6 +74,31 @@ class SessionHistory:
         with closing(sqlite3.connect(self._path, timeout=10)) as db, db:
             db.execute("BEGIN IMMEDIATE")
             for sid, session in current.items():
+                if session.get('transport') == 'native' and session.get('lifecycle') != 'alive':
+                    # A socket/heartbeat outage never proves the process ended.
+                    # Only the native protocol's explicit archive confirms an end.
+                    previous = db.execute(
+                        "SELECT last_seen,ended_at FROM session_history WHERE id=?", (sid,)
+                    ).fetchone()
+                    last_seen, ended_at = previous or (now, None)
+                    if session.get('lifecycle') == 'ended' and ended_at is None:
+                        ended_at = now
+                    session.update(
+                        alive=False if ended_at is not None else None,
+                        lifecycle='ended' if ended_at is not None else 'unreachable',
+                        last_seen=last_seen, ended_at=ended_at, activity=None,
+                        last_activity=session.get('activity') or session.get('status'),
+                        menu=None, control=None, native_control=None, revision=None,
+                        has_question=False, notification_eligible=False,
+                    )
+                    summary = {k: v for k, v in session.items() if k not in _TRANSIENT}
+                    db.execute(
+                        "INSERT INTO session_history VALUES (?,?,?,?,?) "
+                        "ON CONFLICT(id) DO UPDATE SET summary=excluded.summary, "
+                        "ended_at=excluded.ended_at",
+                        (sid, session['host'], json.dumps(summary), last_seen, ended_at),
+                    )
+                    continue
                 session.update(alive=True, lifecycle="alive", last_seen=now, ended_at=None,
                                last_status=session.get("status", "unknown"),
                                last_status_label=session.get("status_label"))
@@ -89,20 +114,22 @@ class SessionHistory:
             for sid, host, summary, last_seen, ended_at in stored:
                 if sid in current:
                     continue
-                if ended_at is None and host in successful:
+                session = json.loads(summary)
+                if ended_at is None and host in successful and session.get('transport') != 'native':
                     ended_at = now
                     db.execute("UPDATE session_history SET ended_at=? WHERE id=?", (ended_at, sid))
                 if ended_at is not None and ended_at <= now - RETENTION_SECONDS:
                     db.execute("DELETE FROM session_history WHERE id=?", (sid,))
                     continue
                 lifecycle = "ended" if ended_at is not None else "unreachable"
-                session = json.loads(summary)
                 # Older persisted summaries have activity but no last_activity.
                 last_activity = session.get("last_activity", session.get("activity", session.get("last_status")))
                 session.update(alive=False if ended_at is not None else None,
                                lifecycle=lifecycle, activity=None, last_activity=last_activity,
                                last_seen=last_seen, ended_at=ended_at, menu=None, control=None,
                                revision=None, notification_eligible=False)
+                if session.get('transport') == 'native':
+                    session.update(native_control=None, has_question=False)
                 retained.append(session)
             result["sessions"] = list(current.values()) + retained
         return result

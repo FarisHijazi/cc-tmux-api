@@ -98,14 +98,14 @@ function lifecycle(session) {
   return 'unknown';
 }
 const canControl = session => lifecycle(session) === 'alive';
-const attention = s => canControl(s) && (!!s.menu || s.has_question === true || ['question','permission'].includes(s.attention_kind) || /waiting|question|menu|attention|blocked|error|failed|permission|accident/i.test([s.status, s.status_label].filter(Boolean).join(' ')));
+const attention = s => canControl(s) && (!!s.native_control || !!s.menu || s.has_question === true || ['question','permission'].includes(s.attention_kind) || /waiting|question|menu|attention|blocked|error|failed|permission|accident/i.test([s.status, s.status_label].filter(Boolean).join(' ')));
 function Lifecycle({ session }) {
   const state = lifecycle(session);
   return html`<span class=${`lifecycle ${state}`}>${{alive:'Alive',ended:'Ended',unreachable:'Unreachable',unknown:'Lifecycle unknown'}[state]}</span>`;
 }
 function ActionLabel({ session }) {
   if (!attention(session)) return null;
-  const label = session.has_question === true || session.attention_kind === 'question' || session.menu || /question|menu/i.test(session.status || '') ? 'Question' : session.attention_kind === 'permission' || /permission/i.test(session.status_label || '') ? 'Needs permission' : 'Awaiting action';
+  const label = session.native_control?.tool_name === 'AskUserQuestion' || session.has_question === true || session.attention_kind === 'question' || session.menu || /question|menu/i.test(session.status || '') ? 'Question' : session.native_control || session.attention_kind === 'permission' || /permission/i.test(session.status_label || '') ? 'Needs permission' : 'Awaiting action';
   return html`<span class="action-label">${label}</span>`;
 }
 function Status({ session }) {
@@ -191,6 +191,7 @@ function MessageText({ text }) {
   return html`<div class="message-text markdown" dir="auto" dangerouslySetInnerHTML=${{__html:clean}}/>`;
 }
 function TranscriptEmpty({ session, openTerminal }) {
+  if (session.transport === 'native') return html`<${Empty} title="No conversation messages yet" icon="terminal">Messages will appear when this session sends them.<//>`;
   const reason = {
     identity_missing: 'HQ couldn’t identify the exact Claude conversation for this session.',
     file_missing: 'Claude hasn’t saved a conversation file for this session.',
@@ -240,6 +241,36 @@ function Question({ id, menu, tail, disabled, act }) {
     <div class="actions"><button disabled=${disabled} onClick=${() => act('key', {key:'Escape'})}>Cancel</button>${(review || menu.multi_select || free) && html`<button class="primary" disabled=${disabled || (free && (!hasInserted || !!answer.trim())) || (!review && !free && !submitOption)} onClick=${confirm}>${review ? 'Submit answer' : free ? 'Confirm typed answer' : 'Continue'}</button>`}</div>
   </section>`;
 }
+function NativeControl({ id, control, disabled, act }) {
+  const questions = control.tool_name === 'AskUserQuestion' && Array.isArray(control.input?.questions) ? control.input.questions : [];
+  const draftId = `${id}:native:${control.request_id}`;
+  const [answers, setAnswers] = useState(() => {
+    try { return JSON.parse(readDraft(draftId)) || {}; } catch { return {}; }
+  });
+  const [saved, setSaved] = useState(true);
+  const update = (index, value) => {
+    const next = {...answers, [index]: {...answers[index], ...value}};
+    setAnswers(next); setSaved(saveDraft(draftId, JSON.stringify(next)));
+  };
+  const valueFor = index => {
+    const answer = answers[index] || {};
+    return [...(answer.selected || []), ...(answer.custom?.trim() ? [answer.custom.trim()] : [])].join(', ');
+  };
+  const ready = questions.length > 0 && questions.every((_, index) => valueFor(index));
+  const respond = async behavior => {
+    const response = {request_id:control.request_id, behavior};
+    if (behavior === 'deny') response.message = 'Denied by the user in HQ.';
+    else response.updated_input = questions.length ? {...control.input, answers:Object.fromEntries(questions.map((question, index) => [question.question, valueFor(index)]))} : control.input;
+    if (await act('respond', {response})) saveDraft(draftId, '');
+  };
+  return html`<section class="question-card native-control" aria-label=${questions.length ? 'Pending questions' : 'Tool permission'}><div class="question-label">${questions.length ? 'Your input is needed' : 'Permission required'}<span>${control.tool_name}</span></div>
+    ${questions.length ? questions.map((question, index) => {
+      const answer = answers[index] || {};
+      const selected = answer.selected || [];
+      return html`<fieldset disabled=${disabled}><legend>${question.header && html`<small>${question.header}</small>`}${question.question}</legend><div class="question-options">${(question.options || []).map(option => html`<label class="question-option ${selected.includes(option.label) ? 'chosen' : ''}"><input type=${question.multiSelect ? 'checkbox' : 'radio'} name=${`${draftId}:${index}`} checked=${selected.includes(option.label)} onChange=${event => update(index, {selected:question.multiSelect ? event.currentTarget.checked ? [...selected, option.label] : selected.filter(label => label !== option.label) : [option.label], ...(question.multiSelect ? {} : {custom:''})})}/><span><strong>${option.label}</strong>${option.description && html`<small>${option.description}</small>`}</span></label>`)}</div><label class="answer-form">${question.multiSelect ? 'Additional answer' : 'Custom answer'}<textarea rows="2" value=${answer.custom || ''} onInput=${event => update(index, {custom:event.currentTarget.value, ...(question.multiSelect ? {} : {selected:[]})})}/></label></fieldset>`;
+    }) : html`<h3>Allow ${control.tool_name}?</h3><pre class="terminal-output">${JSON.stringify(control.input || {}, null, 2)}</pre>`}
+    ${!saved && html`<p role="status">Answers could not be saved on this device.</p>`}<div class="actions"><button disabled=${disabled} onClick=${() => respond('deny')}>Deny</button><button class="primary" disabled=${disabled || (questions.length > 0 && !ready)} onClick=${() => respond('allow')}>${questions.length ? 'Submit answers' : 'Allow'}</button></div></section>`;
+}
 function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, 5000);
   // Retain only this mounted session's already-viewed history, never persist it.
@@ -250,6 +281,8 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   // carries authoritative lifecycle; never keep showing cached Alive controls.
   const observed = snapshot && ['ended','unreachable'].includes(lifecycle(snapshot)) ? {...resource.data,...snapshot} : resource.data || snapshot;
   const s = observed ? {...observed, messages:observed.messages?.length ? observed.messages : history.current.messages, tail:observed.tail || history.current.tail} : null;
+  const native = s?.transport === 'native';
+  const pending = native ? !!s?.native_control : !!s?.menu;
   const [tab, setTab] = useState('conversation');
   const [draft, setDraft] = useState(() => readDraft(id));
   const [draftOpen, setDraftOpen] = useState(false);
@@ -264,7 +297,7 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   useEffect(() => {
     const container = transcript.current;
     if (!container) return;
-    const question = s?.menu ? s.menu.signature || JSON.stringify([s.menu.question, s.menu.kind]) : null;
+    const question = native ? s?.native_control?.request_id : s?.menu ? s.menu.signature || JSON.stringify([s.menu.question, s.menu.kind]) : null;
     if (question) {
       if (shownQuestion.current !== question) {
         const card = container.querySelector('.question-card');
@@ -276,7 +309,7 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
     }
     shownQuestion.current = null;
     if (pinned.current) container.scrollTop = container.scrollHeight;
-  }, [s?.messages, s?.menu, tab]);
+  }, [s?.messages, s?.menu, s?.native_control, tab]);
   const act = async (action, extra = {}) => {
     if (lock.current || !resource.data || !canControl(s) || s?.revision == null || resource.error || !navigator.onLine) return false;
     lock.current = true; setBusy(true); setActionError(''); setNotice('');
@@ -294,14 +327,15 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
     ${s && html`<div class="detail-context"><span title=${s.workdir} dir="auto">${s.workdir || s.session}</span>${toggleMute && html`<button class="quiet-button" onClick=${() => toggleMute(id)}>${muted ? 'Unmute' : 'Mute'}</button>`}</div>`}
     ${s && html`<div class="detail-lifecycle"><${Lifecycle} session=${s}/><${ActionLabel} session=${s}/><span>${lifecycle(s) === 'ended' ? endedDate(s.ended_at) : lifecycle(s) === 'unreachable' ? `Last seen ${when(s.last_seen)}` : ''}</span></div>`}
     ${s && !canControl(s) && html`<div class="lifecycle-notice" role="status">${lifecycle(s) === 'ended' ? 'This session has ended. Its available history is read-only.' : lifecycle(s) === 'unreachable' ? 'This session is unreachable. Its last known activity does not mean it has ended.' : 'Session availability has not been confirmed. Controls are unavailable.'}</div>`}
-    <div class="detail-tabs" role="tablist" aria-label="Session view">${['conversation','terminal'].map(t => html`<button role="tab" id=${`tab-${t}`} aria-selected=${tab === t} aria-controls="session-panel" class=${tab === t ? 'active' : ''} onClick=${() => setTab(t)}>${t === 'conversation' ? 'Conversation' : 'Terminal'}</button>`)}</div>
+    <div class="detail-tabs" role="tablist" aria-label="Session view">${(native ? ['conversation'] : ['conversation','terminal']).map(t => html`<button role="tab" id=${`tab-${t}`} aria-selected=${native || tab === t} aria-controls="session-panel" class=${native || tab === t ? 'active' : ''} onClick=${() => setTab(t)}>${t === 'conversation' ? 'Conversation' : 'Terminal'}</button>`)}</div>
     <${ErrorNotice} message=${resource.error} retry=${resource.reload}/><${ErrorNotice} message=${actionError}/>
     <div class="transcript" id="session-panel" role="tabpanel" aria-labelledby=${`tab-${tab}`} ref=${transcript} onScroll=${e => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
-      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<article class=${`message ${m.role}`} key=${i}><div class="message-author">${m.role === 'user' ? 'You' : 'Claude'}</div><${MessageText} text=${m.text}/></article>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
-      ${s?.menu && canControl(s) && html`<${Question} key=${s.menu.question + s.menu.kind} id=${id} menu=${s.menu} tail=${s.tail} disabled=${disabled} act=${act}/>`}
+      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<article class=${`message ${m.role}`} key=${i}><div class="message-author">${m.role === 'user' ? 'You' : 'Claude'}</div><${MessageText} text=${m.text}/></article>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
+      ${native && s?.native_control && canControl(s) && html`<${NativeControl} key=${s.native_control.request_id} id=${id} control=${s.native_control} disabled=${disabled} act=${act}/>`}
+      ${!native && s?.menu && canControl(s) && html`<${Question} key=${s.menu.question + s.menu.kind} id=${id} menu=${s.menu} tail=${s.tail} disabled=${disabled} act=${act}/>`}
     </div>
-    <div class="detail-bottom">${s && !canControl(s) ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`<div><details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>
-    ${s?.menu && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${!!s?.menu && !draftOpen}><form class="composer" onSubmit=${e => { e.preventDefault(); if (draft.trim() && !s?.menu) act('send', { text: draft }); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${s?.menu ? 'Draft a message for after this question…' : 'Message this session…'} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || !!s?.menu}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : s?.menu ? 'Use the question controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
+    <div class="detail-bottom">${s && !canControl(s) ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`<div>${native ? html`<div class="native-actions"><${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => act('interrupt')}/></div>` : html`<details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>`}
+    ${pending && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${pending && !draftOpen}><form class="composer" onSubmit=${e => { e.preventDefault(); if (draft.trim() && !pending) act('send', { text: draft }); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : 'Message this session…'} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : pending ? 'Use the request controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
   </section>`;
 }
 function ArmedButton({ label, onFire, disabled = false }) {

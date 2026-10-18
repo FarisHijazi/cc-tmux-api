@@ -45,6 +45,21 @@ _receipts = {}
 _cache = {}
 
 
+def native_backend():
+    from .native_remote import get_backend
+    return get_backend()
+
+
+NATIVE_HOST = {'id': '@native', 'label': 'Remote Control', 'native': True}
+
+
+def _native_row(item):
+    row = dict(item, identity={'native': item['id']})
+    result = _decorate(NATIVE_HOST, row)
+    result.update(lifecycle=item['lifecycle'], alive=item['alive'])
+    return result
+
+
 def node_id():
     value = os.environ.get('CC_TMUX_NODE_ID') or socket.gethostname()
     if not re.fullmatch(r'[A-Za-z0-9_.:-]{1,128}', value):
@@ -192,6 +207,14 @@ def _resolve(identifier):
         host_id, identity = decoded
     except (ValueError, TypeError) as exc:
         raise FleetError('Invalid session ID', 400) from exc
+    if host_id == NATIVE_HOST['id']:
+        if (not isinstance(identity, dict) or set(identity) != {'native'} or
+                not isinstance(identity['native'], str) or
+                not re.fullmatch(r'cse_[A-Za-z0-9_-]{1,128}', identity['native'])):
+            raise FleetError('Invalid native session route', 400)
+        if native_backend() is None:
+            raise FleetError('Native Remote Control is unavailable', 503)
+        return NATIVE_HOST, identity
     host = next((h for h in hosts() if h['id'] == host_id), None)
     if not host:
         raise FleetError('Host is not configured', 404)
@@ -275,6 +298,11 @@ def _local_snapshot(config):
         if local:
             with ThreadPoolExecutor(max_workers=min(8, len(local))) as pool:
                 results = list(pool.map(_host_snapshot, local))
+        native = native_backend()
+        if native is not None:
+            results.append((dict(NATIVE_HOST, available=True, lifecycle='alive',
+                                 host_path=[NATIVE_HOST['id']], federated=False),
+                            [_native_row(row) for row in native.rows()]))
         result = _observe_local(dict(hosts=[r[0] for r in results],
                                     sessions=[s for r in results for s in r[1]], updated_at=time.time()))
         with _cache_lock:
@@ -323,7 +351,7 @@ def _peer_snapshot(host, context):
 
 def snapshot(path=()):
     context = _context(path)  # Check BEFORE any cache/target lock or network IO.
-    config = hosts()
+    config = [] if os.environ.get('CC_TMUX_NATIVE_ONLY') == '1' else hosts()
     cache_key = (context, json.dumps(config, sort_keys=True))
     with _cache_lock:
         entry = _cache.get('entries', {}).get(cache_key)
@@ -370,6 +398,8 @@ def _ended_summary(identifier, refresh=False):
 def detail(id, path=()):
     context = _context(path)
     host, identity = _resolve(id)
+    if host.get('native'):
+        return _native_row(native_backend().detail(identity['native']))
     if host.get('url'):
         result = _peer(host, '/api/sessions/' + urlparse.quote(identity['peer'], safe=''), context)
         if result.get('id') != identity['peer']:
@@ -388,7 +418,7 @@ def detail(id, path=()):
         raise
 
 
-def act(id, action, revision, request_id, text=None, key=None, index=None, path=()):
+def act(id, action, revision, request_id, text=None, key=None, index=None, path=(), response=None):
     context = _context(path)
     host, identity = _resolve(id)
     if not host.get("url") and _ended_summary(id):
@@ -399,9 +429,12 @@ def act(id, action, revision, request_id, text=None, key=None, index=None, path=
         raise FleetError('revision is required', 400)
     request = dict(op='act', identity=identity, action=action, revision=revision,
                    request_id=request_id, text=text, key=key, index=index)
+    if response is not None:
+        request['response'] = response
     fingerprint = json.dumps(request, sort_keys=True)
     # Lock the physical target, not user-supplied ID spelling or generation.
-    target = ((host['url'], identity['peer']) if host.get('url') else
+    target = (('@native', identity['native']) if host.get('native') else
+              (host['url'], identity['peer']) if host.get('url') else
               (host.get('ssh', 'local'), identity[0], identity[1]))
     receipt_key = (host['id'], request_id)
     with _guard:
@@ -423,8 +456,13 @@ def act(id, action, revision, request_id, text=None, key=None, index=None, path=
             receipt = {'payload': fingerprint}
             _receipts[receipt_key] = receipt
         try:
-            if host.get('url'):
+            if host.get('native'):
+                result = native_backend().act(identity['native'], action, revision,
+                                              request_id, text=text, response=response)
+            elif host.get('url'):
                 payload = {k: request[k] for k in ('action', 'revision', 'request_id', 'text', 'key', 'index')}
+                if response is not None:
+                    payload['response'] = response
                 result = _peer(host, '/api/sessions/' + urlparse.quote(identity['peer'], safe='') + '/action',
                                context, payload=payload)
             else:

@@ -14,9 +14,15 @@ The persistent ftower aggregator is published at the requested hostname; see
 [the ftower deployment log](docs/devlog/claude_20261008-ftower-deployment.md) for
 runtime ownership and verification. Application certificate handling remains
 outside this design. Public origins can be configured without an app token.
-The public hostname now requires Traefik Basic Auth on every path. Preserve that
-proxy gate; private peers remain token-free. Password material belongs outside
-this repository. See [the auth/discovery follow-up](docs/devlog/claude_20261008-auth-and-discovery.md).
+The public hostname now uses Traefik's `require-authentik@file` middleware on
+every path, verified against the live route on 2026-10-18. Preserve that gate;
+private peers remain token-free. The deployment owner's
+`provision/traefik/config/cchq.yml` selects the middleware, and
+`compose/authentik/CLAUDE.md` owns the shared authentication service. The
+[auth/discovery follow-up](docs/devlog/claude_20261008-auth-and-discovery.md)
+records the earlier Basic Auth deployment, not the current gate. See
+[the native transport devlog](docs/devlog/claude_20261018-native-remote-control.md)
+for current verification. Credentials remain outside this repository.
 Sahalat runs 0.4.4: shell-labelled panes require a unique ancestry-safe Claude
 with its own foreground process marker, never just a foreground parent shell.
 The old Sahalat session lacks current UUID evidence; preserve its terminal
@@ -41,9 +47,19 @@ On the Mac, preserve the existing SSH forward and disabled legacy HQ service.
 The persistent generic HQ has replaced the preview, with worker management disabled.
 The Mac now serves local sessions only; ftower connects directly to all four peers
 and also discovers its own local sessions. Domain wrappers remain on the VMs.
-The ftower deployment log supersedes the earlier aggregation/public-access state.
+The ftower deployment log records aggregation ownership; its authentication
+claims are superseded by the verified Authentik route described here.
 
 Existing ownership boundaries:
+- `native_remote.py` owns optional native Remote Control v2 transport state,
+  authenticated per-session worker streams and structured pending controls.
+  The existing fleet remains the action/receipt owner; SessionHistory remains
+  the lifecycle-summary owner. Native disconnect is never evidence of end.
+  Keep human input provenance, single stream leases, epochs and delivery ACKs
+  aligned with the tested CLI. Native routes require their separate launch or
+  worker credential even when browser pairing is disabled. Read
+  `docs/devlog/claude_20261018-native-remote-control.md` on demand (plain path).
+  `CC_TMUX_NATIVE_ONLY=1` excludes terminal discovery for isolated live tests.
 - `src/cc_tmux_api/workers.py` owns the unattended worker namespace and its revival
   and reaping. Preserve the imported routine rescheduling and worker `; exit`
   behavior; see README for the contract. Ordinary interactive sessions must not
