@@ -79,3 +79,26 @@ proxy's locked Rust test suite. No new model backend was added. HQ's transcript
 is still text-only: this change does not add screenshot viewing or a live desktop.
 The accidental video-player requests were cancelled; no player or site changes
 were made for them.
+
+## Deployed transport verification
+
+The Mac root checkout was fast-forwarded to `44a7648`, synchronized with
+`uv sync --locked`, and the existing `com.local.cc-tmux-hq` service restarted.
+The ftower aggregator now uses immutable 0.5.1 wheel release
+`242faa84d905ce72ab4da2afbe3ce312fc4ace704fe37968b331fd4eb482830c`.
+Its locked dependencies passed `uv pip check` before restarting only the
+existing `cc-tmux-hq.service`. Configurations, native keys, persistent state,
+peers and Authentik settings were preserved. The source unit backup is
+`compose/cchq/cc-tmux-hq.service.before-computer-use-20261018`; the previous
+0.5.0 release `00c8cbd7…` remains available for rollback using that unit.
+
+Actual Chrome, through ftower's federated route to an owned Mac test session,
+passed the same three simulated computer-use consent actions with all expected
+wire replies. A separate real Claude process accepted one browser-origin prompt
+through ftower and completed `HQ_DEPLOYED`, independently seen in its terminal.
+These confirm deployed consent transport and ordinary native-session regression,
+not desktop execution. Evidence is under private runtime
+`tmp/cchq-computer-use/preview/evidence/deployed-federated-dialog-final/` and
+`deployed-native-regression/`. Both services returned healthy session/auth APIs,
+all configured peers remained available, native unauthenticated registration
+returned 401, and the public authentication gate still returned 302.
