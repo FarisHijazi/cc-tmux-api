@@ -22,10 +22,12 @@ const target = remote ? 'cc-mobile-browser-toy-20261008:0.0' : 'cc-mobile-resear
 const expected = remote
   ? ['cc-mobile-browser-toy-20261008', '%37', '/tmp/cc-mobile-browser-toy-c620be5c-5c58-4ad6-a039-97fe1673fa6f', 'claude', '2265987']
   : ['cc-mobile-research-toy', '%121', '/private/tmp/cc-mobile-research', '2.1.294', '6697'];
-const expectedHost = remote ? 'work-a' : 'local';
+// The remote toy's ssh alias (and the host name HQ reports for it).
+const remoteHost = process.env.CC_REMOTE_HOST ?? 'work-a';
+const expectedHost = remote ? remoteHost : 'local';
 const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 const tmuxRead = args => remote
-  ? execFileSync('ssh', ['work-a', ['tmux', ...args].map(quote).join(' ')], { encoding: 'utf8' })
+  ? execFileSync('ssh', [remoteHost, ['tmux', ...args].map(quote).join(' ')], { encoding: 'utf8' })
   : execFileSync('tmux', args, { encoding: 'utf8' });
 let routedIdentity;
 function verifyNative() {
@@ -36,7 +38,7 @@ function verifyNative() {
     expect(tmuxRead(['display-message', '-p', '#{pid}|#{start_time}|#{socket_path}']).trim(), 'Native tmux generation').toBe(routedIdentity[0]);
     expect(tmuxRead(['display-message', '-p', '-t', target, '#{session_created}']).trim(), 'Native session generation').toBe(String(routedIdentity[3]));
     const args = ['ps', '-p', String(routedIdentity[4]), '-o', 'lstart='];
-    const birth = remote ? execFileSync('ssh', ['work-a', args.map(quote).join(' ')], { encoding: 'utf8' })
+    const birth = remote ? execFileSync('ssh', [remoteHost, args.map(quote).join(' ')], { encoding: 'utf8' })
       : execFileSync(args[0], args.slice(1), { encoding: 'utf8' });
     expect(birth.trim().replace(/\s+/g, ' '), 'Native Claude process birth').toBe(routedIdentity[5]);
   }
