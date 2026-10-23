@@ -9,3 +9,5 @@ and preserve the existing production service and HTTPS owners.
 Native launch keys are private runtime files; never place their values in docs.
 Computer-use protocol support, deployed consent tests and account/OS limits are recorded
 in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).
+The native-first UI and the Remote Control protocol as claude.ai uses it (captured
+requests, parity table) are in `docs/devlog/claude_20261023-native-ui-and-rc-protocol.md`.

@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import threading
 import time
@@ -33,6 +34,14 @@ MAX_METADATA_BYTES = 256 * 1024
 MAX_PENDING_BYTES = 512 * 1024
 COMPUTER_USE_DIALOG = "computer_use_approval"
 COMPUTER_USE_FLAGS = ("clipboardRead", "clipboardWrite", "systemKeyCombos")
+PERMISSION_MODES = ("default", "acceptEdits", "plan", "auto", "dontAsk", "bypassPermissions")
+MAX_TOOL_TEXT = 8000
+MAX_STREAMING = 64 * 1024
+COMMAND = re.compile(r"<command-name>/?([^<]+)</command-name>.*?<command-args>(.*?)</command-args>", re.S)
+MODEL_NAME = re.compile(r"[A-Za-z0-9._:\[\]/-]{1,128}")
+REVISION = re.compile(r"[0-9]{1,18}")
+MODEL_COMMAND = re.compile(r"\s*/model\b")
+RATE_WINDOWS = ("five_hour", "seven_day", "seven_day_overage_included")
 
 
 def _size(value):
@@ -41,6 +50,23 @@ def _size(value):
 
 def _digest(value):
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _clip(text, limit=MAX_TOOL_TEXT):
+    return text if len(text) <= limit else text[:limit] + f"\n… ({len(text) - limit} more characters)"
+
+
+def _block_text(content):
+    """Text of a message or tool_result content: a string or a list of blocks."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        b["text"]
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+    )
 
 
 def _frame(event):
@@ -173,7 +199,26 @@ class NativeRemote:
         )
         status = "waiting" if pending else session["worker_status"]
         status = {"running": "working", "requires_action": "waiting"}.get(status, status)
+        meta = session.get("meta", {})
+        worker = session.get("external_metadata", {})
+        usage = worker.get("context_usage") if isinstance(worker.get("context_usage"), dict) else {}
         return dict(
+            model=meta.get("model") or worker.get("model"),
+            permission_mode=meta.get("permission_mode") or worker.get("permission_mode"),
+            effort=worker.get("effort_level"),
+            task_summary=worker.get("task_summary"),
+            context_tokens=usage.get("used_tokens") or meta.get("context_tokens"),
+            context_window=usage.get("max_tokens"),
+            rate_limits=copy.deepcopy(meta.get("rate_limits")),
+            control_error=meta.get("control_error"),
+            **(
+                {
+                    "slash_commands": list(meta.get("slash_commands", [])),
+                    "streaming": session.get("streaming") if alive else None,
+                }
+                if detail
+                else {}
+            ),
             id=sid,
             session=sid,
             label=session["title"],
@@ -202,6 +247,8 @@ class NativeRemote:
                 "send": alive,
                 "interrupt": alive,
                 "respond": alive and pending is not None,
+                "set_model": alive,
+                "set_permission_mode": alive,
                 "terminal": False,
             },
             menu=None,
@@ -272,14 +319,25 @@ class NativeRemote:
             row = self.detail(raw_id)
             if row["lifecycle"] != "alive":
                 raise FleetError("Native session is not connected", 409)
-            if revision != row["revision"]:
-                raise FleetError("Native session changed; refresh before acting", 409)
             session = self._sessions[raw_id]
+            # Every streamed token bumps the revision, so commands are only stale
+            # when they predate the last human input or bridge reconnect. Answers
+            # still need the exact screen they were given for.
+            floor = max(session.get("input_revision", 0), session.get("bridge_revision", 0))
+            stale = (
+                revision != row["revision"]
+                if action == "respond"
+                else not REVISION.fullmatch(str(revision)) or int(revision) < floor
+            )
+            if stale:
+                raise FleetError("Native session changed; refresh before acting", 409)
             if action == "send":
                 if not isinstance(text, str) or not text.strip() or len(text) > 100000:
                     raise FleetError("Message must contain 1–100000 characters", 400)
                 if self._pending(session):
                     raise FleetError("Answer the pending native request first", 409)
+                if MODEL_COMMAND.match(text):
+                    raise FleetError("Switch models with the model picker; /model also changes the saved default", 400)
                 payload = dict(
                     type="user",
                     client_platform="web_claude_ai",
@@ -291,6 +349,24 @@ class NativeRemote:
             elif action == "interrupt":
                 payload = dict(
                     type="control_request", request_id=request_id, request={"subtype": "interrupt"}
+                )
+            elif action == "set_model":
+                # A control request changes this session only; a typed /model
+                # would also overwrite the user's saved default model.
+                if not isinstance(text, str) or not MODEL_NAME.fullmatch(text):
+                    raise FleetError("Invalid model name", 400)
+                payload = dict(
+                    type="control_request",
+                    request_id=request_id,
+                    request={"subtype": "set_model", "model": text},
+                )
+            elif action == "set_permission_mode":
+                if text not in PERMISSION_MODES:
+                    raise FleetError("Unknown permission mode", 400)
+                payload = dict(
+                    type="control_request",
+                    request_id=request_id,
+                    request={"subtype": "set_permission_mode", "mode": text},
                 )
             elif action == "respond":
                 pending = next(iter(self._pending(session).values()), None)
@@ -307,7 +383,13 @@ class NativeRemote:
                     updated = response.get("updated_input", pending.get("input", {}))
                     if not isinstance(updated, dict):
                         raise FleetError("updatedInput must be an object", 400)
-                    answer = {"behavior": "allow", "updatedInput": updated}
+                    # Same shape claude.ai sends (captured from 2.1.304).
+                    answer = {"behavior": "allow", "updatedInput": updated, "tool_name": pending["tool_name"]}
+                    if pending.get("tool_use_id"):
+                        answer["toolUseID"] = pending["tool_use_id"]
+                    # "Always allow" applies the rules Claude itself proposed, nothing broader.
+                    if response.get("always") is True and pending.get("suggestions"):
+                        answer["updatedPermissions"] = pending["suggestions"]
                 elif behavior == "deny":
                     answer = {"behavior": "deny", "message": str(response.get("message", "Denied"))}
                 else:
@@ -327,6 +409,13 @@ class NativeRemote:
                 self._message(session, payload)
             elif action == "respond":
                 self._pending(session).pop(pending["request_id"])
+            elif action in ("set_model", "set_permission_mode"):
+                # Shown only once Claude confirms; see _ingest.
+                key = "model" if action == "set_model" else "permission_mode"
+                controls = session.setdefault("controls", {})
+                controls[request_id] = [key, text]
+                session["controls"] = dict(list(controls.items())[-64:])
+            session["input_revision"] = session["revision"]
             self._save()
             return dict(
                 ok=True,
@@ -417,27 +506,132 @@ class NativeRemote:
             return
         message = payload.get("message", {})
         content = message.get("content", []) if isinstance(message, dict) else []
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            text = "\n".join(
-                b["text"]
-                for b in content
-                if isinstance(b, dict)
-                and b.get("type") == "text"
-                and isinstance(b.get("text"), str)
-            )
+        if not isinstance(content, (str, list)):
+            return
+        uid = payload.get("uuid") or message.get("id") or str(uuid4())
+        entries = []
+        if role == "user":
+            # Tool output belongs to the tool call that produced it, not to a new message.
+            for block in content if isinstance(content, list) else []:
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    self._tool_result(session, block)
+            text = _block_text(content)
+            command = COMMAND.search(text)
+            if command:
+                entries.append(
+                    dict(role="command", text=f"/{command[1].strip()} {command[2].strip()}".rstrip())
+                )
+            elif text.startswith("[Request interrupted by user"):
+                entries.append(dict(role="system", text=text.strip("[]")))
+            elif text:
+                entries.append(dict(role="user", text=text))
+        elif payload.get("local_command_source") or message.get("model") == "<synthetic>":
+            entries.append(dict(role="system", text=_block_text(content)))
         else:
-            return
-        if not text:
-            return
-        uid = payload.get("uuid") or message.get("id")
-        if uid and any(m.get("id") == uid for m in session["messages"]):
-            return
-        session["messages"].append(dict(role=role, text=text, id=uid or str(uuid4())))
+            for block in content if isinstance(content, list) else []:
+                kind = block.get("type") if isinstance(block, dict) else None
+                if kind == "text" and isinstance(block.get("text"), str):
+                    entries.append(dict(role="assistant", text=block["text"]))
+                elif kind == "thinking" and isinstance(block.get("thinking"), str):
+                    entries.append(dict(role="thinking", text=block["thinking"]))
+                elif kind == "tool_use" and isinstance(block.get("id"), str):
+                    entries.append(
+                        dict(
+                            role="tool",
+                            id=block["id"],
+                            name=str(block.get("name", "Tool")),
+                            input=_clip(json.dumps(block.get("input", {}), ensure_ascii=False)),
+                            text="",
+                        )
+                    )
+            if isinstance(content, str):
+                entries.append(dict(role="assistant", text=content))
+            # A thinking record can land after the next text block's first delta.
+            if any(e["role"] == "assistant" for e in entries):
+                session["streaming"] = None
+        known = {m.get("id") for m in session["messages"]}
+        for index, entry in enumerate(entries):
+            entry.setdefault("id", uid if index == 0 else f"{uid}:{index}")
+            if entry["id"] in known or (entry["role"] != "tool" and not entry["text"]):
+                continue
+            session["messages"].append(entry)
         session["messages"] = session["messages"][-MAX_MESSAGES:]
         while session["messages"] and _size(session["messages"]) > MAX_MESSAGE_BYTES:
             session["messages"].pop(0)
+
+    @staticmethod
+    def _tool_result(session, block):
+        call = next(
+            (
+                m
+                for m in reversed(session["messages"])
+                if m.get("role") == "tool" and m.get("id") == block.get("tool_use_id")
+            ),
+            None,
+        )
+        if call is not None:
+            call["text"] = _clip(_block_text(block.get("content")))
+            call["is_error"] = block.get("is_error") is True
+            call["done"] = True
+
+    @staticmethod
+    def _stream(session, payload):
+        """Live text of the reply being generated; the final assistant record replaces it."""
+        event = payload.get("event")
+        if not isinstance(event, dict) or payload.get("parent_tool_use_id"):
+            return
+        kind = event.get("type")
+        if kind == "message_start":
+            usage = (event.get("message") or {}).get("usage") or {}
+            tokens = sum(
+                usage.get(key) or 0
+                for key in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens")
+            )
+            if tokens:
+                session.setdefault("meta", {})["context_tokens"] = tokens
+            session["streaming"] = None
+        elif kind == "content_block_delta":
+            delta = event.get("delta") or {}
+            if delta.get("type") == "text_delta" and isinstance(delta.get("text"), str):
+                session["streaming"] = ((session.get("streaming") or "") + delta["text"])[
+                    -MAX_STREAMING:
+                ]
+
+    def _metadata(self, session, payload):
+        meta = session.setdefault("meta", {})
+        text = lambda value, limit=128: value[:limit] if isinstance(value, str) else None
+        number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        kind = payload.get("type")
+        if kind == "system" and payload.get("subtype") in ("init", "status"):
+            for key, field in (("model", "model"), ("permission_mode", "permissionMode")):
+                if text(payload.get(field)):
+                    meta[key] = text(payload[field])
+            commands = payload.get("slash_commands")
+            if isinstance(commands, list):
+                meta["slash_commands"] = [c[:128] for c in commands if isinstance(c, str)][:500]
+        elif kind == "rate_limit_event":
+            windows = (payload.get("rate_limit_info") or {}).get("unifiedWindows")
+            if isinstance(windows, dict):
+                meta["rate_limits"] = {
+                    name: {
+                        "utilization": number(windows[name].get("utilization")),
+                        "resets_at": number(windows[name].get("resetsAt")),
+                    }
+                    for name in RATE_WINDOWS
+                    if isinstance(windows.get(name), dict)
+                }
+        elif kind == "control_response":
+            response = payload["response"]
+            control = session.get("controls", {}).pop(response["request_id"], None)
+            reply = response.get("response") if isinstance(response.get("response"), dict) else {}
+            if control and response.get("subtype") == "success":
+                meta[control[0]] = control[1]
+                meta.pop("control_error", None)
+            elif control:
+                meta["control_error"] = text(str(response.get("error") or "Claude rejected the change"), 500)
+            for key, field in (("model", "current_model"), ("permission_mode", "current_permission_mode")):
+                if text(reply.get(field)):
+                    meta[key] = text(reply[field])
 
     @staticmethod
     def _valid_payload(payload):
@@ -556,12 +750,19 @@ class NativeRemote:
         if not isinstance(payload, dict):
             return
         self._message(session, payload)
+        self._metadata(session, payload)
         kind = payload.get("type")
+        if kind == "stream_event":
+            self._stream(session, payload)
         for incoming in self._incoming_requests(session, payload):
             request = incoming["request"]
             self._pending(session)[incoming["request_id"]] = dict(
                 request_id=incoming["request_id"],
                 tool_name=request.get("tool_name", "Computer use"),
+                tool_use_id=request.get("tool_use_id") if isinstance(request.get("tool_use_id"), str) else None,
+                suggestions=[
+                    item for item in request.get("permission_suggestions") or [] if isinstance(item, dict)
+                ][:8],
                 input=request.get("payload", {})
                 if request.get("subtype") == "request_user_dialog"
                 else request.get("input", {}),
@@ -580,6 +781,7 @@ class NativeRemote:
             session["claude_session_id"] = payload.get("session_id", session["id"])
         elif kind == "result":
             session["worker_status"] = "idle"
+            session["streaming"] = None
         session["revision"] += 1
 
     def replay(self, sid, cursor):
@@ -655,6 +857,7 @@ class NativeRemote:
                     )
                 session["epoch"] += 1
                 session["revision"] += 1
+                session["bridge_revision"] = session["revision"]
                 self._streams.pop(sid, None)
                 token = secrets.token_urlsafe(48)
                 session["worker_hash"] = _digest(token)
