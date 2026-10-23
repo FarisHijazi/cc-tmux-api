@@ -151,7 +151,7 @@ class Oneshot(BaseModel):
 
 
 class SessionAction(BaseModel):
-    action: Literal["send", "key", "type", "select", "submit", "respond", "interrupt"]
+    action: Literal["send", "key", "type", "select", "submit", "respond", "interrupt", "set_model", "set_permission_mode"]
     revision: str = Field(min_length=1, max_length=256)
     request_id: str = Field(min_length=8, max_length=128)
     text: str | None = Field(default=None, max_length=32000)

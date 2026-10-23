@@ -39,7 +39,7 @@ HQ dashboard. Sessions groups existing Claude panes by host or directory, with
 search, attention filtering, conversation/terminal views, and guarded controls.
 Workers and Routines retain the unattended workflow described below;
 `#w-<session>` opens a worker card. Fleet links use `/#session=<encoded-id>`.
-This checkout is version 0.5.1; the upstream `uvx` command
+This checkout is version 0.6.0; the upstream `uvx` command
 above uses the published repository, not necessarily this checkout.
 
 For Anthropic-hosted `claude.ai/code/session_…` links per worker, enable remote

@@ -50,8 +50,10 @@ function useResource(path, interval = 0) {
   const [state, setState] = useState({ data: null, error: '', hasLoaded: false, loading: true });
   const generation = useRef(0);
   const active = useRef(true);
+  const inFlight = useRef(false);
   const reload = async () => {
     if (!path) return;
+    inFlight.current = true;
     const run = ++generation.current;
     setState(s => ({ ...s, loading: true }));
     try {
@@ -61,18 +63,21 @@ function useResource(path, interval = 0) {
     } catch (e) {
       if (active.current && run === generation.current) setState(s => ({ ...s, error: e.message, hasLoaded: true, loading: false }));
       return null;
-    }
+    } finally { if (run === generation.current) inFlight.current = false; }
   };
   useEffect(() => {
     active.current = true;
     setState({ data: null, error: '', hasLoaded: false, loading: true });
     reload();
-    const timer = interval && setInterval(() => { if (!document.hidden) reload(); }, interval);
     const resume = () => { if (!document.hidden) reload(); };
     window.addEventListener('online', resume);
     document.addEventListener('visibilitychange', resume);
-    return () => { active.current = false; generation.current++; clearInterval(timer); window.removeEventListener('online', resume); document.removeEventListener('visibilitychange', resume); };
+    return () => { active.current = false; generation.current++; window.removeEventListener('online', resume); document.removeEventListener('visibilitychange', resume); };
   }, [path]);
+  useEffect(() => {
+    const timer = interval && setInterval(() => { if (!document.hidden && !inFlight.current) reload(); }, interval);
+    return () => clearInterval(timer);
+  }, [path, interval]);
   return { ...state, reload };
 }
 function ErrorNotice({ message, retry }) {
@@ -190,6 +195,50 @@ function MessageText({ text }) {
   const clean = useMemo(() => DOMPurify.sanitize(marked.parse(String(text || ''), {gfm:true,breaks:false}), markdownPolicy), [text]);
   return html`<div class="message-text markdown" dir="auto" dangerouslySetInnerHTML=${{__html:clean}}/>`;
 }
+// Native entries carry a role: user, assistant, thinking, tool (a call and its
+// output), command (a slash command the user ran) or system (its local output).
+function toolSummary(m) {
+  let input = {};
+  try { input = JSON.parse(m.input || '{}'); } catch {}
+  const value = input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || input.prompt || '';
+  return String(value).split('\n')[0].slice(0, 160);
+}
+function Message({ m }) {
+  if (m.role === 'tool') return html`<details class=${`tool-call${m.is_error ? ' failed' : m.done ? '' : ' running'}`}><summary><span class="tool-name">${m.name}</span><span class="tool-arg" dir="auto">${toolSummary(m)}</span><span class="tool-state">${m.is_error ? 'Error' : m.done ? '' : 'Running…'}</span></summary><pre class="tool-io">${m.input}</pre>${m.done && html`<pre class="tool-io">${m.text || 'No output.'}</pre>`}</details>`;
+  if (m.role === 'thinking') return html`<details class="thinking"><summary>Thinking</summary><${MessageText} text=${m.text}/></details>`;
+  if (m.role === 'command') return html`<div class="command-line"><code dir="auto">${m.text}</code></div>`;
+  if (m.role === 'system') return html`<div class="system-note" dir="auto">${m.text}</div>`;
+  return html`<article class=${`message ${m.role}`}><div class="message-author">${m.role === 'user' ? 'You' : 'Claude'}</div><${MessageText} text=${m.text}/></article>`;
+}
+// Suggestions only: any model the session's launcher can route may be typed.
+const MODEL_CHOICES = ['opus', 'sonnet', 'haiku', 'fable', 'gpt-5.6-sol'];
+const PERMISSION_MODES = [['auto', 'Auto'], ['default', 'Manual'], ['acceptEdits', 'Accept edits'], ['plan', 'Plan'], ['dontAsk', "Don't ask"], ['bypassPermissions', 'Bypass permissions']];
+const MODE_LABELS = Object.fromEntries(PERMISSION_MODES);
+const percent = value => typeof value === 'number' ? `${Math.round(value * 100)}%` : null;
+function NativeBar({ session, disabled, act }) {
+  const [model, setModel] = useState('');
+  const limits = session.rate_limits || {};
+  const modes = PERMISSION_MODES.some(([value]) => value === session.permission_mode) || !session.permission_mode ? PERMISSION_MODES : [...PERMISSION_MODES, [session.permission_mode, session.permission_mode]];
+  const usage = [
+    session.context_tokens && `${Math.round(session.context_tokens / 1000)}k${session.context_window ? ` / ${Math.round(session.context_window / 1000)}k` : ''} context`,
+    typeof session.effort === 'string' && `${session.effort} effort`,
+    percent(limits.five_hour?.utilization) && `5h ${percent(limits.five_hour.utilization)}`,
+    percent(limits.seven_day?.utilization) && `7d ${percent(limits.seven_day.utilization)}`,
+  ].filter(Boolean).join(' · ');
+  const switchModel = async e => { e.preventDefault(); const value = model.trim(); if (value && await act('set_model', { text: value })) setModel(''); };
+  return html`<div class="native-bar">
+    <form class="model-form" onSubmit=${switchModel}><span class="model-current" title="Current model">${session.model || 'Model not reported yet'}</span><label class="sr-only" for="model-input">Switch model</label><input id="model-input" list="model-choices" value=${model} placeholder="Switch to…" autocomplete="off" disabled=${disabled} onInput=${e => setModel(e.target.value)}/><datalist id="model-choices">${MODEL_CHOICES.map(choice => html`<option value=${choice}/>`)}</datalist><button type="submit" disabled=${disabled || !model.trim()}>Switch</button></form>
+    ${session.capabilities?.set_permission_mode && html`<label class="mode-select">Mode <select value=${session.permission_mode || ''} disabled=${disabled || !session.permission_mode} onChange=${e => act('set_permission_mode', { text: e.target.value })}>${!session.permission_mode && html`<option value="">Not reported yet</option>`}${modes.map(([value, label]) => html`<option value=${value}>${label}</option>`)}</select></label>`}
+    ${usage && html`<span class="usage">${usage}</span>`}
+    ${session.control_error && html`<span class="control-error" role="alert">${session.control_error}</span>`}
+  </div>`;
+}
+function SlashMenu({ draft, commands, pick }) {
+  const match = /^\/(\S*)$/.exec(draft);
+  if (!match || !commands?.length) return null;
+  const found = commands.filter(c => c.toLowerCase().startsWith(match[1].toLowerCase())).slice(0, 8);
+  return found.length ? html`<div class="slash-menu" role="listbox" aria-label="Slash commands">${found.map(c => html`<button type="button" role="option" onClick=${() => pick(`/${c} `)}>/${c}</button>`)}</div>` : null;
+}
 function TranscriptEmpty({ session, openTerminal }) {
   if (session.transport === 'native') return html`<${Empty} title="No conversation messages yet" icon="terminal">Messages will appear when this session sends them.<//>`;
   const reason = {
@@ -285,8 +334,9 @@ function NativeControl({ id, control, disabled, act }) {
     return [...(answer.selected || []), ...(answer.custom?.trim() ? [answer.custom.trim()] : [])].join(', ');
   };
   const ready = questions.length > 0 && questions.every((_, index) => valueFor(index));
-  const respond = async behavior => {
-    const response = {request_id:control.request_id, behavior};
+  const suggestion = (control.suggestions || []).map(item => item.type === 'setMode' ? `switches this session to ${MODE_LABELS[item.mode] || item.mode}` : item.type === 'addRules' ? `adds ${(item.rules || []).map(rule => rule.toolName + (rule.ruleContent ? `(${rule.ruleContent})` : '')).join(', ')} to ${item.destination === 'session' ? 'this session' : item.destination}` : null).filter(Boolean).join('; ');
+  const respond = async (behavior, always = false) => {
+    const response = {request_id:control.request_id, behavior, ...(always ? {always:true} : {})};
     if (behavior === 'deny') response.message = 'Denied by the user in HQ.';
     else response.updated_input = questions.length ? {...control.input, answers:Object.fromEntries(questions.map((question, index) => [question.question, valueFor(index)]))} : control.input;
     if (await act('respond', {response})) saveDraft(draftId, '');
@@ -297,10 +347,12 @@ function NativeControl({ id, control, disabled, act }) {
       const selected = answer.selected || [];
       return html`<fieldset disabled=${disabled}><legend>${question.header && html`<small>${question.header}</small>`}${question.question}</legend><div class="question-options">${(question.options || []).map(option => html`<label class="question-option ${selected.includes(option.label) ? 'chosen' : ''}"><input type=${question.multiSelect ? 'checkbox' : 'radio'} name=${`${draftId}:${index}`} checked=${selected.includes(option.label)} onChange=${event => update(index, {selected:question.multiSelect ? event.currentTarget.checked ? [...selected, option.label] : selected.filter(label => label !== option.label) : [option.label], ...(question.multiSelect ? {} : {custom:''})})}/><span><strong>${option.label}</strong>${option.description && html`<small>${option.description}</small>`}</span></label>`)}</div><label class="answer-form">${question.multiSelect ? 'Additional answer' : 'Custom answer'}<textarea rows="2" value=${answer.custom || ''} onInput=${event => update(index, {custom:event.currentTarget.value, ...(question.multiSelect ? {} : {selected:[]})})}/></label></fieldset>`;
     }) : html`<h3>Allow ${control.tool_name}?</h3><pre class="terminal-output">${JSON.stringify(control.input || {}, null, 2)}</pre>`}
-    ${!saved && html`<p role="status">Answers could not be saved on this device.</p>`}<div class="actions"><button disabled=${disabled} onClick=${() => respond('deny')}>Deny</button><button class="primary" disabled=${disabled || (questions.length > 0 && !ready)} onClick=${() => respond('allow')}>${questions.length ? 'Submit answers' : 'Allow'}</button></div></section>`;
+    ${!saved && html`<p role="status">Answers could not be saved on this device.</p>`}<div class="actions"><button disabled=${disabled} onClick=${() => respond('deny')}>Deny</button>${!questions.length && suggestion && html`<button disabled=${disabled} title=${`Always allow ${suggestion}`} onClick=${() => respond('allow', true)}>Always allow</button>`}<button class="primary" disabled=${disabled || (questions.length > 0 && !ready)} onClick=${() => respond('allow')}>${questions.length ? 'Submit answers' : suggestion ? 'Allow once' : 'Allow'}</button></div>${!questions.length && suggestion && html`<p class="read-only-note">Always allow ${suggestion}.</p>`}</section>`;
 }
 function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
-  const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, 5000);
+  const [fast, setFast] = useState(false);
+  const [kick, setKick] = useState(0); // poll fast briefly after a control so its confirmation shows promptly
+  const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, fast || kick ? 1000 : 5000);
   // Retain only this mounted session's already-viewed history, never persist it.
   const history = useRef({messages:null,tail:''});
   if (resource.data?.messages?.length) history.current.messages = resource.data.messages;
@@ -311,6 +363,8 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   const s = observed ? {...observed, messages:observed.messages?.length ? observed.messages : history.current.messages, tail:observed.tail || history.current.tail} : null;
   const native = s?.transport === 'native';
   const pending = native ? !!s?.native_control : !!s?.menu;
+  const streaming = native && canControl(s) ? s?.streaming : null;
+  useEffect(() => setFast(native && canControl(s) && (s?.status === 'working' || !!streaming)), [native, s?.status, s?.lifecycle, !!streaming]);
   const [tab, setTab] = useState('conversation');
   const [draft, setDraft] = useState(() => readDraft(id));
   const [draftOpen, setDraftOpen] = useState(false);
@@ -337,13 +391,15 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
     }
     shownQuestion.current = null;
     if (pinned.current) container.scrollTop = container.scrollHeight;
-  }, [s?.messages, s?.menu, s?.native_control, tab]);
+  }, [s?.messages, s?.menu, s?.native_control, tab, streaming]);
   const act = async (action, extra = {}) => {
     if (lock.current || !resource.data || !canControl(s) || s?.revision == null || resource.error || !navigator.onLine) return false;
     lock.current = true; setBusy(true); setActionError(''); setNotice('');
     try {
-      await api(`/api/sessions/${encodeURIComponent(id)}/action`, { action, ...extra, revision: s.revision, request_id: requestId() });
-      if (action === 'send') { setDraft(''); saveDraft(id, ''); }
+      const { fromDraft, ...body } = extra;
+      await api(`/api/sessions/${encodeURIComponent(id)}/action`, { action, ...body, revision: s.revision, request_id: requestId() });
+      if (action === 'send' || extra.fromDraft) { setDraft(''); saveDraft(id, ''); }
+      setKick(k => k + 1); setTimeout(() => setKick(k => k - 1), 8000);
       setNotice(action === 'send' ? 'Message sent.' : 'Control sent. Screen refreshed.');
       return true;
     } catch (e) { setActionError(`${e.message} Nothing will be retried automatically. Check the refreshed session before trying again.`); return false; }
@@ -351,19 +407,27 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   };
   const disabled = busy || !resource.data || !canControl(s) || !s || s.revision == null || !!resource.error || !navigator.onLine;
   const key = value => act('key', { key: value });
+  const submit = () => {
+    if (!draft.trim() || pending) return;
+    const model = native && s?.capabilities?.set_model && /^\/model\s+(\S+)\s*$/.exec(draft);
+    if (model) act('set_model', { text: model[1], fromDraft: true });
+    else act('send', { text: draft });
+  };
   return html`<section class="detail" aria-label="Session detail"><header class="detail-header"><button class="icon-button back" aria-label="Back to sessions" onClick=${back}><${Icon} name="back"/></button><div class="detail-title"><h2>${s?.title || s?.session || 'Session'}</h2><span>${s ? displayHostLabel(s.host_label || s.host) : 'Connecting…'}</span></div>${s && html`<${Status} session=${s}/>`}<button class="icon-button" disabled=${resource.loading} aria-label="Refresh session" onClick=${resource.reload}><${Icon} name="refresh"/></button></header>
     ${s && html`<div class="detail-context"><span title=${s.workdir} dir="auto">${s.workdir || s.session}</span>${toggleMute && html`<button class="quiet-button" onClick=${() => toggleMute(id)}>${muted ? 'Unmute' : 'Mute'}</button>`}</div>`}
     ${s && html`<div class="detail-lifecycle"><${Lifecycle} session=${s}/><${ActionLabel} session=${s}/><span>${lifecycle(s) === 'ended' ? endedDate(s.ended_at) : lifecycle(s) === 'unreachable' ? `Last seen ${when(s.last_seen)}` : ''}</span></div>`}
     ${s && !canControl(s) && html`<div class="lifecycle-notice" role="status">${lifecycle(s) === 'ended' ? 'This session has ended. Its available history is read-only.' : lifecycle(s) === 'unreachable' ? 'This session is unreachable. Its last known activity does not mean it has ended.' : 'Session availability has not been confirmed. Controls are unavailable.'}</div>`}
+    ${native && s && canControl(s) && s.capabilities?.set_model && html`<${NativeBar} session=${s} disabled=${disabled} act=${act}/>`}
     <div class="detail-tabs" role="tablist" aria-label="Session view">${(native ? ['conversation'] : ['conversation','terminal']).map(t => html`<button role="tab" id=${`tab-${t}`} aria-selected=${native || tab === t} aria-controls="session-panel" class=${native || tab === t ? 'active' : ''} onClick=${() => setTab(t)}>${t === 'conversation' ? 'Conversation' : 'Terminal'}</button>`)}</div>
     <${ErrorNotice} message=${resource.error} retry=${resource.reload}/><${ErrorNotice} message=${actionError}/>
     <div class="transcript" id="session-panel" role="tabpanel" aria-labelledby=${`tab-${tab}`} ref=${transcript} onScroll=${e => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
-      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<article class=${`message ${m.role}`} key=${i}><div class="message-author">${m.role === 'user' ? 'You' : 'Claude'}</div><${MessageText} text=${m.text}/></article>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
+      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<${Message} key=${m.id || i} m=${m}/>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
+      ${streaming && html`<article class="message assistant streaming" aria-live="polite"><div class="message-author">Claude</div><${MessageText} text=${streaming}/></article>`}
       ${native && s?.native_control && canControl(s) && html`<${NativeControl} key=${s.native_control.request_id} id=${id} control=${s.native_control} disabled=${disabled} act=${act}/>`}
       ${!native && s?.menu && canControl(s) && html`<${Question} key=${s.menu.question + s.menu.kind} id=${id} menu=${s.menu} tail=${s.tail} disabled=${disabled} act=${act}/>`}
     </div>
     <div class="detail-bottom">${s && !canControl(s) ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`<div>${native ? html`<div class="native-actions"><${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => act('interrupt')}/></div>` : html`<details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>`}
-    ${pending && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${pending && !draftOpen}><form class="composer" onSubmit=${e => { e.preventDefault(); if (draft.trim() && !pending) act('send', { text: draft }); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : 'Message this session…'} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : pending ? 'Use the request controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
+    ${pending && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${pending && !draftOpen}>${native && html`<${SlashMenu} draft=${draft} commands=${s?.slash_commands} pick=${value => { setDraft(value); setSaved(saveDraft(id, value)); document.getElementById('reply')?.focus(); }}/>`}<form class="composer" onSubmit=${e => { e.preventDefault(); submit(); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : 'Message this session…'} onKeyDown=${e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : pending ? 'Use the request controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
   </section>`;
 }
 function ArmedButton({ label, onFire, disabled = false }) {

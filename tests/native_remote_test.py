@@ -209,7 +209,7 @@ def test_permission_response_matches_exact_pending_request(native):
     assert reply == {
         "request_id": "permission-1",
         "subtype": "success",
-        "response": {"behavior": "allow", "updatedInput": {"command": "echo test"}},
+        "response": {"behavior": "allow", "updatedInput": {"command": "echo test"}, "tool_name": "Bash"},
     }
     assert backend.detail(sid)["native_control"] is None
     with pytest.raises(FleetError, match="stale"):
@@ -866,3 +866,171 @@ def test_malformed_initialize_redelivery_rejected_atomically(native):
     }
     assert post(native, sid, auth, epoch, [computer_use_request(), response]).status_code == 400
     assert backend._sessions[sid] == before
+
+
+def test_transcript_pairs_tool_calls_and_labels_local_commands(native):
+    backend, _, _ = native
+    sid, auth, epoch = register(native)
+    tool_call = {
+        "type": "assistant",
+        "uuid": "call",
+        "message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "List it first"},
+            {"type": "tool_use", "id": "toolu_1", "name": "Bash", "input": {"command": "ls /"}},
+        ]},
+    }
+    tool_output = {
+        "type": "user",
+        "uuid": "output",
+        "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "bin\nboot", "is_error": False},
+        ]},
+    }
+    command = {
+        "type": "user",
+        "uuid": "command",
+        "message": {"role": "user", "content": "<command-name>/model</command-name>\n"
+                    "<command-message>model</command-message>\n<command-args>gpt-5.6-sol</command-args>"},
+    }
+    command_output = {
+        "type": "assistant",
+        "uuid": "command-output",
+        "local_command_source": "slash",
+        "message": {"role": "assistant", "model": "<synthetic>",
+                    "content": [{"type": "text", "text": "Set model to gpt-5.6-sol"}]},
+    }
+    interrupted = {"type": "user", "uuid": "interrupted",
+                   "message": {"role": "user", "content": [{"type": "text", "text": "[Request interrupted by user]"}]}}
+    events = [tool_call, tool_output, command, command_output, interrupted]
+    assert post(native, sid, auth, epoch, events).status_code == 200
+    messages = backend.detail(sid)["messages"]
+    assert [m["role"] for m in messages] == ["thinking", "tool", "command", "system", "system"]
+    assert messages[4]["text"] == "Request interrupted by user"
+    tool = messages[1]
+    assert (tool["name"], json.loads(tool["input"]), tool["text"], tool["is_error"]) == (
+        "Bash", {"command": "ls /"}, "bin\nboot", False)
+    assert messages[2]["text"] == "/model gpt-5.6-sol"
+
+
+def test_streaming_text_and_session_metadata(native):
+    backend, _, _ = native
+    sid, auth, epoch = register(native)
+    connected(backend, sid)
+
+    def stream(event):
+        return {"type": "stream_event", "uuid": str(time.time_ns()), "event": event}
+
+    events = [
+        {"type": "system", "subtype": "init", "uuid": "init", "model": "claude-sonnet-5-5",
+         "permissionMode": "auto", "slash_commands": ["review", "compact"]},
+        {"type": "rate_limit_event", "uuid": "limits", "rate_limit_info": {"unifiedWindows": {
+            "five_hour": {"utilization": 0.08, "resetsAt": 1792766400}}}},
+        stream({"type": "message_start", "message": {"usage": {
+            "input_tokens": 2, "cache_read_input_tokens": 100, "cache_creation_input_tokens": 30}}}),
+        stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "Hel"}}),
+        stream({"type": "content_block_delta", "delta": {"type": "text_delta", "text": "lo"}}),
+    ]
+    assert post(native, sid, auth, epoch, events).status_code == 200
+    connected(backend, sid)
+    row = backend.detail(sid)
+    assert (row["model"], row["permission_mode"], row["slash_commands"]) == (
+        "claude-sonnet-5-5", "auto", ["review", "compact"])
+    assert row["context_tokens"] == 132
+    assert row["rate_limits"] == {"five_hour": {"utilization": 0.08, "resets_at": 1792766400}}
+    assert row["streaming"] == "Hello"
+    late_thinking = {"type": "assistant", "uuid": "think",
+                     "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}]}}
+    post(native, sid, auth, epoch, [late_thinking])
+    connected(backend, sid)
+    assert backend.detail(sid)["streaming"] == "Hello"
+    final = {"type": "assistant", "uuid": "final",
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "Hello"}]}}
+    post(native, sid, auth, epoch, [final])
+    connected(backend, sid)
+    assert backend.detail(sid)["streaming"] is None
+    assert [m["text"] for m in backend.detail(sid)["messages"]] == ["Hello"]
+
+
+def test_model_and_mode_change_only_after_claude_confirms(native):
+    backend, _, _ = native
+    sid, auth, epoch = register(native)
+    revision = connected(backend, sid)
+    with pytest.raises(FleetError, match="model"):
+        backend.act(sid, "set_model", revision, "bad-model", text="x y")
+    with pytest.raises(FleetError, match="mode"):
+        backend.act(sid, "set_permission_mode", revision, "bad-mode", text="yolo")
+    backend.act(sid, "set_model", revision, "model-1", text="gpt-5.6-sol")
+    request = backend.replay(sid, 0)[-1]["payload"]
+    assert request == {"type": "control_request", "request_id": "model-1",
+                       "request": {"subtype": "set_model", "model": "gpt-5.6-sol"}}
+    assert backend.detail(sid)["model"] is None
+    reply = {"type": "control_response", "response": {"subtype": "success", "request_id": "model-1"}}
+    post(native, sid, auth, epoch, [reply])
+    connected(backend, sid)
+    assert backend.detail(sid)["model"] == "gpt-5.6-sol"
+    backend.act(sid, "set_permission_mode", backend.detail(sid)["revision"], "mode-1", text="plan")
+    failure = {"type": "control_response",
+               "response": {"subtype": "error", "request_id": "mode-1", "error": "not allowed"}}
+    post(native, sid, auth, epoch, [failure])
+    connected(backend, sid)
+    row = backend.detail(sid)
+    assert (row["permission_mode"], row["control_error"]) == (None, "not allowed")
+
+
+def test_streaming_does_not_make_commands_stale(native):
+    backend, _, _ = native
+    sid, auth, epoch = register(native)
+    revision = connected(backend, sid)
+    delta = {"type": "stream_event", "uuid": "delta",
+             "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "…"}}}
+    post(native, sid, auth, epoch, [delta])
+    connected(backend, sid)
+    assert backend.detail(sid)["revision"] != revision
+    backend.act(sid, "interrupt", revision, "interrupt-while-streaming")
+    with pytest.raises(FleetError, match="changed"):
+        backend.act(sid, "send", revision, "after-own-input", text="stale screen")
+
+
+def test_guards_reject_unsafe_commands_and_bound_metadata(native):
+    backend, client, _ = native
+    sid, auth, epoch = register(native)
+    revision = connected(backend, sid)
+    with pytest.raises(FleetError, match="changed"):
+        backend.act(sid, "interrupt", "²", "unicode-digit")
+    with pytest.raises(FleetError, match="model picker"):
+        backend.act(sid, "send", revision, "typed-model", text="  /model gpt-5.6-sol")
+    noisy = [
+        {"type": "system", "subtype": "init", "uuid": "init", "model": "m" * 5000,
+         "slash_commands": ["c" * 5000] * 900},
+        {"type": "rate_limit_event", "uuid": "limits", "rate_limit_info": {"unifiedWindows": {
+            "five_hour": {"utilization": "lots", "resetsAt": 1}, "invented": {"utilization": 1}}}},
+    ]
+    post(native, sid, auth, epoch, noisy)
+    client.put(f"/v1/code/sessions/{sid}/worker", headers=auth, json={
+        "worker_epoch": epoch,
+        "external_metadata": {"context_usage": {"used_tokens": 1200, "max_tokens": 1000000},
+                              "effort_level": "high"}})
+    connected(backend, sid)
+    row = backend.detail(sid)
+    assert len(row["model"]) == 128
+    assert len(row["slash_commands"]) == 500 and {len(c) for c in row["slash_commands"]} == {128}
+    assert row["rate_limits"] == {"five_hour": {"utilization": None, "resets_at": 1}}
+    assert (row["context_tokens"], row["context_window"], row["effort"]) == (1200, 1000000, "high")
+
+
+def test_always_allow_applies_only_claudes_own_suggestion(native):
+    backend, _, _ = native
+    sid, auth, epoch = register(native)
+    connected(backend, sid)
+    suggestion = {"type": "setMode", "mode": "acceptEdits", "destination": "session"}
+    ask = {"type": "control_request", "request_id": "write-1", "request": {
+        "subtype": "can_use_tool", "tool_name": "Write", "tool_use_id": "toolu_w",
+        "input": {"file_path": "/tmp/a.txt", "content": "x"}, "permission_suggestions": [suggestion]}}
+    post(native, sid, auth, epoch, [ask])
+    row = backend.detail(sid)
+    assert row["native_control"]["suggestions"] == [suggestion]
+    backend.act(sid, "respond", row["revision"], "always-1",
+                response={"request_id": "write-1", "behavior": "allow", "always": True})
+    answer = backend.replay(sid, 0)[-1]["payload"]["response"]["response"]
+    assert answer == {"behavior": "allow", "updatedInput": {"file_path": "/tmp/a.txt", "content": "x"},
+                      "tool_name": "Write", "toolUseID": "toolu_w", "updatedPermissions": [suggestion]}

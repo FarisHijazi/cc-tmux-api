@@ -60,7 +60,9 @@ Existing ownership boundaries:
   worker credential even when browser pairing is disabled. Read
   `docs/devlog/claude_20261018-native-remote-control.md` on demand (plain path).
   `CC_TMUX_NATIVE_ONLY=1` excludes tmux, SSH and peer discovery for isolated tests.
-  Mac and ftower native ingress/aggregation now run 0.5.1; production
+  ftower runs 0.6.0 (native-first UI, set_model/set_permission_mode, Always allow;
+  `docs/devlog/claude_20261023-native-ui-and-rc-protocol.md`, plain path, also the
+  captured claude.ai Remote Control protocol). The Mac still runs 0.5.1; production
   federation was verified with a new interactive session and real browser input.
   `computer_use_approval` uses native `request_user_dialog` and explicit app/flag
   consent, not generic tool allow/deny. Advertise only supported dialog kinds;
