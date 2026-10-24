@@ -21,6 +21,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from . import rc_mirror
 from .session_history import RETENTION_SECONDS
 
 MAX_EVENTS = 1000
@@ -42,6 +43,7 @@ MODEL_NAME = re.compile(r"[A-Za-z0-9._:\[\]/-]{1,128}")
 REVISION = re.compile(r"[0-9]{1,18}")
 MODEL_COMMAND = re.compile(r"\s*/model\b")
 RATE_WINDOWS = ("five_hour", "seven_day", "seven_day_overage_included")
+UPSTREAM_INJECTABLE = ("user", "control_request", "control_response", "control_cancel_request")
 
 
 def _size(value):
@@ -87,11 +89,17 @@ class NativeRemote:
         self._path = Path(state_dir) / "native-remote.json"
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self._sessions = {}
+        self.upstream = None  # rc_mirror.Mirror when this hub mirrors to Anthropic
         if self._path.exists():
             data = json.loads(self._path.read_text())
             if data.get("version") != 1 or not isinstance(data.get("sessions"), dict):
                 raise ValueError("Invalid native Remote Control state")
             self._sessions = data["sessions"]
+        # No mirror link survives a restart; one starts again when the CLI next calls.
+        for session in self._sessions.values():
+            upstream = session.get("upstream")
+            if upstream and upstream.get("status") not in (None, "ended"):
+                upstream["status"] = "disconnected"
 
     def enable_computer_use_dialogs(self):
         """Call only from a host whose UI can render and answer this consent dialog."""
@@ -122,6 +130,87 @@ class NativeRemote:
         session["dialog_declaration_epoch"] = session["epoch"]
         session["dialog_declaration_request_id"] = request_id
         self._save()
+
+    def _mirror(self, session, kind=None, body=None):
+        """Hand work to the upstream mirror; it only enqueues, so this is safe under the lock."""
+        if (
+            self.upstream is None
+            or session.get("private")
+            or session["archived"] and kind != "archive"
+            or session.get("upstream", {}).get("status") == "ended"
+        ):
+            return
+        self.upstream.post(session["id"], kind, body)
+
+    def upstream_snapshot(self, sid):
+        with self._lock:
+            session = self._sessions.get(sid)
+            if session is None:
+                return None
+            upstream = session.get("upstream", {})
+            config = session["config"]
+            return dict(
+                id=upstream.get("id"),
+                cursor=upstream.get("cursor", 0),
+                title=session["title"],
+                config={key: config[key] for key in ("cwd", "model") if key in config},
+            )
+
+    def upstream_state(self, sid):
+        with self._lock:
+            session = self._sessions.get(sid)
+            if session is None:
+                return None
+            return dict(
+                worker_status=session["worker_status"],
+                external_metadata=copy.deepcopy(session["external_metadata"]),
+            )
+
+    def upstream_activity(self, sid):
+        with self._lock:
+            session = self._sessions.get(sid)
+            return None if session is None else session["last_seen"]
+
+    def upstream_update(self, sid, **fields):
+        with self._lock:
+            session = self._sessions.get(sid)
+            if session is None:
+                return
+            upstream = session.setdefault("upstream", {})
+            if any(upstream.get(key) != value for key, value in fields.items()):
+                upstream.update(fields)
+                self._save()
+
+    def upstream_inject(self, sid, upstream_event_id, payload, sequence):
+        """Queue a claude.ai/app event for the CLI exactly as if HQ's UI had sent it."""
+        from .fleet import FleetError
+
+        with self._lock:
+            session = self._sessions.get(sid)
+            if session is None or session["archived"]:
+                return
+            upstream = session.setdefault("upstream", {})
+            if (
+                isinstance(payload, dict)
+                and payload.get("type") in UPSTREAM_INJECTABLE
+                and self._valid_payload(payload)
+            ):
+                try:
+                    event = self._queue(session, payload)
+                except FleetError as exc:
+                    if exc.status == 503:
+                        raise rc_mirror.Busy() from exc
+                    print(f"rc-mirror {sid}: skipped upstream event: {exc}", flush=True)
+                else:
+                    if isinstance(upstream_event_id, str):
+                        upstream.setdefault("delivery", {})[event["event_id"]] = upstream_event_id
+                    if payload["type"] == "user":
+                        self._message(session, payload)
+                    elif payload["type"] == "control_response":
+                        self._pending(session).pop(payload["response"]["request_id"], None)
+                    session["input_revision"] = session["revision"]
+            upstream["cursor"] = sequence
+            self._save()
 
     def _save(self):
         temporary = self._path.with_suffix(".tmp")
@@ -211,6 +300,13 @@ class NativeRemote:
             context_window=usage.get("max_tokens"),
             rate_limits=copy.deepcopy(meta.get("rate_limits")),
             control_error=meta.get("control_error"),
+            private=bool(session.get("private")),
+            upstream={
+                "session_url": session["upstream"].get("session_url"),
+                "status": session["upstream"].get("status"),
+            }
+            if session.get("upstream")
+            else None,
             **(
                 {
                     "slash_commands": list(meta.get("slash_commands", [])),
@@ -299,6 +395,9 @@ class NativeRemote:
         session["acknowledged"] = {
             k: v for k, v in session.get("acknowledged", {}).items() if k in known_ids
         }
+        if "delivery" in session.get("upstream", {}):
+            delivery = session["upstream"]["delivery"]
+            session["upstream"]["delivery"] = {k: v for k, v in delivery.items() if k in known_ids}
         session["sequence"] += 1
         event = dict(
             sequence_num=session["sequence"],
@@ -407,8 +506,20 @@ class NativeRemote:
             event = self._queue(session, payload)
             if action == "send":
                 self._message(session, payload)
+                # claude.ai shows terminal-typed messages because the CLI posts them as
+                # worker events; HQ-typed ones never pass through the CLI's outbound path.
+                worker_payload = {
+                    k: v
+                    for k, v in payload.items()
+                    if k not in ("client_platform", "server_received_wall_ms", "session_id")
+                }
+                self._mirror(session, "events", {"events": [{"payload": worker_payload}]})
             elif action == "respond":
                 self._pending(session).pop(pending["request_id"])
+                # What the CLI posts after a terminal-side answer, so claude.ai and the
+                # app drop their copy of the prompt.
+                cancel = {"type": "control_cancel_request", "request_id": pending["request_id"]}
+                self._mirror(session, "events", {"events": [{"payload": cancel}]})
             elif action in ("set_model", "set_permission_mode"):
                 # Shown only once Claude confirms; see _ingest.
                 key = "model" if action == "set_model" else "permission_mode"
@@ -807,6 +918,10 @@ class NativeRemote:
         @router.post("")
         async def create(request: Request):
             self._launch_auth(request)
+            if request.headers.get("x-hq-mirror"):
+                # An account proxy without the mirror passthrough routed this hub's own
+                # upstream registration back here; accepting it would mirror it again.
+                raise HTTPException(508, "HQ mirror request looped back; update the account proxy")
             body = await self._body(request)
             config = body.get("config", {})
             if not isinstance(config, dict) or not isinstance(body.get("title", ""), str):
@@ -834,9 +949,11 @@ class NativeRemote:
                     last_seen=time.time(),
                     seen_events=[],
                     external_metadata={},
+                    private=request.headers.get("x-hq-private") == "1",
                 )
                 self._sessions[sid] = session
                 self._save()
+                self._mirror(session)
             return {"session": {"id": sid}}
 
         @router.post("/{sid}/bridge")
@@ -893,6 +1010,7 @@ class NativeRemote:
                 self._declare_dialogs(session)
                 self._streams[sid] = lease
                 self._touch(session)
+                self._mirror(session)
 
             async def generate():
                 nonlocal cursor
@@ -951,6 +1069,11 @@ class NativeRemote:
                         raise HTTPException(413, "Native metadata exceeds storage limit")
                     session["external_metadata"] = merged
                     session["revision"] += 1
+                    self._mirror(
+                        session,
+                        "worker",
+                        {k: body[k] for k in ("worker_status", "external_metadata") if k in body},
+                    )
                 self._touch(session)
                 if request.method == "PUT":
                     self._save()
@@ -1005,6 +1128,9 @@ class NativeRemote:
                     session["seen_events"] = list(seen)[-MAX_EVENTS:]
                     self._touch(session)
                     self._save()
+                    fresh = [item for item, r in zip(events, results) if not r["duplicate"]]
+                    if fresh:
+                        self._mirror(session, operation, {"events": fresh})
                     return {"results": results}
                 if operation == "events/delivery":
                     updates = body.get("updates")
@@ -1032,8 +1158,17 @@ class NativeRemote:
                         watermark = event["sequence_num"]
                     session["delivered_sequence"] = watermark
                     session["acknowledged"] = {k: v for k, v in acknowledged.items() if k in known}
+                    origin = session.get("upstream", {}).get("delivery", {})
+                    mapped = [
+                        {"event_id": origin[u["event_id"]], "status": u["status"]}
+                        for u in updates
+                        if u["event_id"] in origin
+                    ]
+                    if mapped:
+                        self._mirror(session, "delivery", {"updates": mapped})
                 if operation in ("heartbeat", "events/delivery", "diagnostics"):
                     self._touch(session)
+                    self._mirror(session)
                     if operation != "heartbeat":
                         self._save()
                     return {"heartbeat_interval_seconds": 20} if operation == "heartbeat" else {}
@@ -1074,6 +1209,7 @@ class NativeRemote:
                 session["archived_at"] = time.time()
                 session["revision"] += 1
                 self._save()
+                self._mirror(session, "archive")
             return {}
 
         return router
@@ -1093,5 +1229,7 @@ def get_backend():
     key = (str(directory.resolve()), _digest(token))
     with _backend_lock:
         if key not in _backends:
-            _backends[key] = NativeRemote(directory / "native", token)
+            backend = NativeRemote(directory / "native", token)
+            backend.upstream = rc_mirror.from_env(backend)
+            _backends[key] = backend
         return _backends[key]

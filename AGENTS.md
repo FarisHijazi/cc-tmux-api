@@ -64,6 +64,13 @@ Existing ownership boundaries:
   `docs/devlog/claude_20261023-native-ui-and-rc-protocol.md`, plain path, also the
   captured claude.ai Remote Control protocol). The Mac still runs 0.5.1; production
   federation was verified with a new interactive session and real browser input.
+  `rc_mirror.py` (0.7.0) owns the optional upstream mirror: it is a Remote
+  Control worker toward Anthropic for each non-private native session and holds
+  no credential (proxy placeholder + `x-hq-mirror`). NativeRemote stays the
+  source of truth; hooks only enqueue, injected events go through `_queue`, and
+  mirror threads take the NativeRemote lock only through `upstream_*` methods,
+  never across a network call. Read
+  `docs/devlog/claude_20261023-upstream-mirror.md` on demand (plain path).
   `computer_use_approval` uses native `request_user_dialog` and explicit app/flag
   consent, not generic tool allow/deny. Advertise only supported dialog kinds;
   keep Pro/Max eligibility, OS permissions and prior session grants intact. Read
