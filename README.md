@@ -39,7 +39,7 @@ HQ dashboard. Sessions groups existing Claude panes by host or directory, with
 search, attention filtering, conversation/terminal views, and guarded controls.
 Workers and Routines retain the unattended workflow described below;
 `#w-<session>` opens a worker card. Fleet links use `/#session=<encoded-id>`.
-This checkout is version 0.6.0; the upstream `uvx` command
+This checkout is version 0.7.0; the upstream `uvx` command
 above uses the published repository, not necessarily this checkout.
 
 For Anthropic-hosted `claude.ai/code/session_…` links per worker, enable remote
@@ -72,8 +72,9 @@ credentials are generated per session. The launch secret is separate from
 optional browser pairing and from any Anthropic credential. Use HTTPS or an
 existing SSH tunnel for a remote HQ; plaintext launcher origins are loopback-only.
 
-These sessions appear in **HQ**, not on claude.ai. Claude currently still prints
-its hardcoded claude.ai URL, which does not point to the self-hosted session.
+These sessions appear in **HQ**. They also appear on claude.ai and in the Claude
+app when the upstream mirror below is configured; otherwise the claude.ai URL the
+CLI prints does not point to the self-hosted session.
 Full native login requirements still apply. This does not attach to an already
 running Claude process: launch or resume it through the configured proxy.
 
@@ -86,6 +87,46 @@ state is private under `CC_TMUX_STATE_DIR/native`; lifecycle summaries continue
 to belong to the shared session-history store.
 
 See [protocol research, tests and deployment evidence](docs/devlog/claude_20261018-native-remote-control.md).
+
+### Mirroring native sessions to claude.ai
+
+HQ can also register each native session with Anthropic's own Remote Control,
+so claude.ai/code and the Claude app list and steer it while HQ stays the CLI's
+only bridge. If Anthropic's relay fails, HQ keeps working; the mirror retries in
+the background and never delays the CLI.
+
+| Variable | Meaning |
+|---|---|
+| `CC_TMUX_RC_UPSTREAM_PROXY` | Account proxy URL, for example `http://127.0.0.1:18790`. Setting it enables the mirror. |
+| `CC_TMUX_RC_UPSTREAM_CA` | CA bundle that signs the proxy's TLS interception (optional). |
+| `CC_TMUX_RC_UPSTREAM_ACCOUNT` | Launcher account that owns the mirrored sessions (default `personal`). |
+
+The mirror holds no Anthropic credential. It sends the launcher placeholder
+`Bearer proxy-account-<account>` with `x-hq-mirror: 1` through the proxy, which
+substitutes the real token and lets those requests reach Anthropic instead of
+routing `/v1/code/sessions` back to HQ. Worker calls use the per-session worker
+token Anthropic returns, which is kept in memory only.
+
+Per session the mirror does what the real CLI does: create and bridge the
+session, `PUT /worker` state, forward every event batch the CLI posts (and
+messages typed in HQ), heartbeat while the CLI is live, and read the worker
+event stream. Events from claude.ai or the app enter HQ's command queue as if
+HQ's UI had sent them; the CLI's delivery acknowledgements are reported back
+under Anthropic's event ids. 401/409 re-bridge; any other refused item (4xx) is
+dropped with a log line so later items still go; stream drops reconnect with
+backoff from the last sequence number, which is persisted with the session.
+Answering a permission prompt in HQ withdraws it on claude.ai and the app. If an
+outdated account proxy routes the mirror's own registration back to HQ, HQ
+answers 508 instead of creating a session, so update the proxy before enabling
+the mirror.
+Local archive archives upstream; an upstream end stops mirroring but keeps the
+HQ session. A session whose CLI is silent for 10 minutes pauses mirroring until
+the CLI calls again, which is also how mirroring resumes after an HQ restart.
+
+Sessions launched with the launcher's private flag arrive with `x-hq-private: 1`
+and are never mirrored. Session rows carry `private` and
+`upstream: {session_url, status}`; the session bar links to claude.ai or shows
+"Private".
 
 ### Native computer use
 

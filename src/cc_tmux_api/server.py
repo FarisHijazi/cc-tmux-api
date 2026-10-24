@@ -28,7 +28,9 @@ Env: BCE_WORKSPACE_DIR (registry base, default ~/.basecamp-enhancer),
      CC_TMUX_PORT (default 8377), CC_TMUX_PREFIX (default "hq-"),
      CC_TMUX_WORKDIR (default workdir for spawns, default $HOME),
      CC_TMUX_ROUTINES_DIR (routines *.md dir — unset = scheduling dormant),
-     CC_TMUX_ROUTINE_REAP_HOURS (kill stale routine workers, default 12).
+     CC_TMUX_ROUTINE_REAP_HOURS (kill stale routine workers, default 12),
+     CC_TMUX_RC_UPSTREAM_PROXY/_CA/_ACCOUNT (mirror native sessions to claude.ai;
+     see README "Mirroring native sessions to claude.ai").
 """
 
 from __future__ import annotations

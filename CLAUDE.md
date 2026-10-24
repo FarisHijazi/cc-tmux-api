@@ -11,3 +11,5 @@ Computer-use protocol support, deployed consent tests and account/OS limits are 
 in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).
 The native-first UI and the Remote Control protocol as claude.ai uses it (captured
 requests, parity table) are in `docs/devlog/claude_20261023-native-ui-and-rc-protocol.md`.
+The claude.ai upstream mirror (design, protocol mapping, test coverage, what is not
+verified live) is in `docs/devlog/claude_20261023-upstream-mirror.md`.
