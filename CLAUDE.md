@@ -13,3 +13,8 @@ The native-first UI and the Remote Control protocol as claude.ai uses it (captur
 requests, parity table) are in `docs/devlog/claude_20261023-native-ui-and-rc-protocol.md`.
 The claude.ai upstream mirror (design, protocol mapping, test coverage, what is not
 verified live) is in `docs/devlog/claude_20261023-upstream-mirror.md`.
+A Rust port lives in `rust/` (branch `rust-rewrite`, not deployed): it embeds
+`fleet_probe.py`/`vendor_amux.py` and the static UI at compile time, so edits to
+those files need a rebuild there too. Scope, gaps (native Remote Control, push
+delivery, `--app`), parity harness (`parity/api_parity.py`) and cutover plan are in
+`docs/devlog/claude_2026-10-26-rust-rewrite.md` (plain path).

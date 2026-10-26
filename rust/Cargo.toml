@@ -1,0 +1,20 @@
+[package]
+name = "cc-tmux-api"
+version = "0.7.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8.9"
+base64 = "0.23.1"
+chrono = "0.4.45"
+getrandom = "0.4.3"
+hmac = "0.13.0"
+include_dir = "0.7.4"
+regex = "1.13.1"
+rusqlite = { version = "0.41.0", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+serde_yaml = "0.9.34"
+sha2 = "0.11.1"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "signal"] }
+ureq = "3.5.0"
