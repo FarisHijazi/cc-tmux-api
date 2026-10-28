@@ -507,7 +507,12 @@ with Chrome installed:
 
 ```bash
 MOBILE_BROWSER_ENV=/path/to/playwright-environment node tests/frontend_test.mjs
+MOBILE_BROWSER_ENV=/path/to/playwright-environment node tests/frontend_layout_test.mjs
 ```
+
+`frontend_test.mjs` writes its screenshots to `HQ_SHOT_DIR` (default: the OS temp
+directory). `frontend_layout_test.mjs` covers inbox ordering/paging, the remembered
+filter, approval visibility, message paging, the model/mode pickers and Enter to send.
 
 See [the browser evidence index](tests/browser/README.md) for the separately gated
 real-preview harness and its evidence. Automated tests and desktop emulation do
