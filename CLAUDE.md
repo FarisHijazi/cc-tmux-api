@@ -15,3 +15,6 @@ The claude.ai upstream mirror (design, protocol mapping, test coverage, what is 
 verified live) is in `docs/devlog/claude_20261023-upstream-mirror.md`.
 The 2026-10-28 web UI rework (live problems found, what changed, deploy steps) is in
 `docs/devlog/claude_20261028-webui-fix.md`.
+Incremental polling (`/api/sessions?ended=0`, detail `after`/`commands` cursors,
+measured payloads, deploy and restart steps) is in
+`docs/devlog/claude_20261028-incremental-polling.md`.

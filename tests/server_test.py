@@ -351,3 +351,78 @@ def test_public_noauth_keeps_origin_host_and_json_guards(public_noauth_client, m
         json={'action': 'key', 'key': 'Escape', 'revision': 'observed', 'request_id': 'request-public'},
         headers=headers)
     assert response.status_code == expected
+
+
+def fake_snapshot(*, path=()):
+    return {"node_id": "hub", "hosts": [], "updated_at": 1,
+            "sessions": [{"id": "a", "lifecycle": "alive"}, {"id": "u", "lifecycle": "unreachable"},
+                         {"id": "e1", "lifecycle": "ended"}, {"id": "e2", "lifecycle": "ended"}]}
+
+
+def test_session_list_can_omit_ended_rows(client, monkeypatch):
+    from cc_tmux_api import fleet
+
+    monkeypatch.setattr(fleet, "snapshot", fake_snapshot)
+    pair(client)
+    full = client.get("/api/sessions").json()
+    assert [s["id"] for s in full["sessions"]] == ["a", "u", "e1", "e2"]
+    assert "ended_count" not in full
+    active = client.get("/api/sessions?ended=0").json()
+    assert [s["id"] for s in active["sessions"]] == ["a", "u"]
+    assert active["ended_count"] == 2 and active["node_id"] == "hub"
+
+
+def fake_detail(messages, commands=None):
+    def detail(session_id, *, path=()):
+        return {"id": session_id, "status": "working", "messages": [dict(m) for m in messages],
+                **({"slash_commands": commands} if commands is not None else {})}
+    return detail
+
+
+def test_detail_returns_only_messages_after_cursor(client, monkeypatch):
+    from cc_tmux_api import fleet
+
+    messages = [{"id": "m1", "text": "a"}, {"id": "m2", "text": "b"}, {"id": "m3", "text": "c"}]
+    monkeypatch.setattr(fleet, "detail", fake_detail(messages))
+    pair(client)
+    full = client.get("/api/sessions/s").json()
+    assert full["messages"] == messages and "messages_after" not in full
+    delta = client.get("/api/sessions/s?after=m2").json()
+    assert delta["messages"] == messages[2:] and delta["messages_after"] == "m2"
+    assert delta["status"] == "working"
+    latest = client.get("/api/sessions/s?after=m3").json()
+    assert latest["messages"] == [] and latest["messages_after"] == "m3"
+    # A pruned or unknown cursor falls back to the full list, unmarked.
+    unknown = client.get("/api/sessions/s?after=gone").json()
+    assert unknown["messages"] == messages and "messages_after" not in unknown
+
+
+def test_detail_cursor_ignored_for_messages_without_ids(client, monkeypatch):
+    from cc_tmux_api import fleet
+
+    messages = [{"role": "user", "text": "hi"}, {"role": "assistant", "text": "hello"}]
+    monkeypatch.setattr(fleet, "detail", fake_detail(messages))
+    pair(client)
+    result = client.get("/api/sessions/s?after=anything").json()
+    assert result["messages"] == messages and "messages_after" not in result
+
+
+def test_detail_omits_unchanged_slash_commands(client, monkeypatch):
+    from cc_tmux_api import fleet
+
+    monkeypatch.setattr(fleet, "detail", fake_detail([], ["clear", "compact"]))
+    pair(client)
+    first = client.get("/api/sessions/s").json()
+    digest = first["slash_commands_digest"]
+    assert first["slash_commands"] == ["clear", "compact"] and len(digest) == 16
+    same = client.get(f"/api/sessions/s?commands={digest}").json()
+    assert "slash_commands" not in same and same["slash_commands_digest"] == digest
+    monkeypatch.setattr(fleet, "detail", fake_detail([], ["clear", "compact", "review"]))
+    changed = client.get(f"/api/sessions/s?commands={digest}").json()
+    assert changed["slash_commands"] == ["clear", "compact", "review"]
+    assert changed["slash_commands_digest"] != digest
+
+
+def test_detail_rejects_oversized_cursor(client):
+    pair(client)
+    assert client.get("/api/sessions/s?after=" + "x" * 300).status_code == 422

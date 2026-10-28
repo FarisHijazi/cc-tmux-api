@@ -46,18 +46,22 @@ async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
   }
   return data;
 }
-function useResource(path, interval = 0) {
+// `query` is read at request time, so an incremental cursor never resets the resource.
+function useResource(path, interval = 0, query = null) {
   const [state, setState] = useState({ data: null, error: '', hasLoaded: false, loading: true });
   const generation = useRef(0);
   const active = useRef(true);
   const inFlight = useRef(false);
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const reload = async () => {
     if (!path) return;
     inFlight.current = true;
     const run = ++generation.current;
     setState(s => ({ ...s, loading: true }));
     try {
-      const data = await api(path);
+      const params = queryRef.current ? new URLSearchParams(queryRef.current()).toString() : '';
+      const data = await api(params ? `${path}${path.includes('?') ? '&' : '?'}${params}` : path);
       if (active.current && run === generation.current) setState({ data, error: '', hasLoaded: true, loading: false });
       return data;
     } catch (e) {
@@ -162,15 +166,16 @@ function SessionRow({ s, group, selected, open }) {
   const state = lifecycle(s);
   return html`<button class=${`session-row ${s.id === selected ? 'selected' : ''}`} onClick=${() => open(s.id)} aria-current=${s.id === selected ? 'true' : undefined}><span class=${`session-mark ${attention(s) ? 'needs-you' : working(s) ? 'working' : ''}`}><${Icon} name=${attention(s) ? 'bell' : 'terminal'} size=${16}/></span><span class="session-main"><span class="row-top"><span class="row-title" dir="auto">${s.title || s.session}</span><span class="row-time">${state === 'ended' ? endedDate(s.ended_at) : state === 'unreachable' ? `Last seen ${when(s.last_seen)}` : when(s.updated_at)}</span></span><span class="row-bottom"><${Status} session=${s}/><span class="row-directory" dir="auto">${group === 'host' ? s.workdir || s.session : displayHostLabel(s.host_label || s.host)}</span>${(state !== 'alive' || attention(s)) && html`<span class="row-lifecycle">${state !== 'alive' && html`<${Lifecycle} session=${s}/>`}<${ActionLabel} session=${s}/></span>`}</span></span></button>`;
 }
-function Inbox({ resource, selected, open }) {
+// Ended rows are most of the fleet; fetch them only for the filters that show them.
+const listPath = filter => ['ended','all'].includes(filter) ? '/api/sessions' : '/api/sessions?ended=0';
+function Inbox({ resource, selected, open, filter, setFilter }) {
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = usePreference('filter', 'active');
   const [group, setGroup] = usePreference('group', 'host');
   const [limit, setLimit] = useState(ROW_PAGE);
   useEffect(() => setLimit(ROW_PAGE), [query, filter, group]);
   const sessions = resource.data?.sessions || [];
-  const endedCount = sessions.filter(s => lifecycle(s) === 'ended').length;
-  const activeCount = sessions.length - endedCount;
+  const endedCount = resource.data?.ended_count ?? sessions.filter(s => lifecycle(s) === 'ended').length;
+  const activeCount = sessions.filter(s => lifecycle(s) !== 'ended').length;
   const displayHosts = leafHosts(resource.data?.hosts || []);
   const unavailable = displayHosts.some(host => !host.available);
   const needing = sessions.filter(attention).length;
@@ -387,19 +392,40 @@ function NativeControl({ id, control, disabled, act }) {
     ${!saved && html`<p role="status">Answers could not be saved on this device.</p>`}<div class="actions"><button disabled=${disabled} onClick=${() => respond('deny')}>Deny</button>${!questions.length && suggestion && html`<button disabled=${disabled} title=${`Always allow ${suggestion}`} onClick=${() => respond('allow', true)}>Always allow</button>`}<button class="primary" disabled=${disabled || (questions.length > 0 && !ready)} onClick=${() => respond('allow')}>${questions.length ? 'Submit answers' : suggestion ? 'Allow once' : 'Allow'}</button></div>${!questions.length && suggestion && html`<p class="read-only-note">Always allow ${suggestion}.</p>`}</section>`;
 }
 const MESSAGE_PAGE = 120;
-const sendOnEnter = () => window.matchMedia?.('(pointer: fine)').matches;
+// Ask only for messages after the last one that can no longer change: a tool
+// call changes once its result arrives, so the cursor stays before the first open one.
+function detailCursor({ messages, digest }) {
+  const m = messages || [];
+  const open = m.findIndex(x => x.role === 'tool' && !x.done);
+  const base = m[(open < 0 ? m.length : open) - 1];
+  return { ...(base?.id ? { after: base.id } : {}), ...(digest ? { commands: digest } : {}) };
+}
+function mergeMessages(known, data) {
+  const incoming = data.messages;
+  if (!Array.isArray(incoming)) return known;
+  if (!data.messages_after) return incoming.length || !known?.length ? incoming : known; // an ended summary keeps the viewed history
+  const at = known ? known.findLastIndex(m => m.id === data.messages_after) : -1;
+  if (at < 0) return null; // cannot place the delta; the next poll fetches everything
+  return !incoming.length && at === known.length - 1 ? known : [...known.slice(0, at + 1), ...incoming];
+}
+const sendOnEnter = () =>window.matchMedia?.('(pointer: fine)').matches;
 function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   const [fast, setFast] = useState(false);
   const [kick, setKick] = useState(0); // poll fast briefly after a control so its confirmation shows promptly
-  const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, fast || kick ? 1000 : 5000);
   // Retain only this mounted session's already-viewed history, never persist it.
-  const history = useRef({messages:null,tail:''});
-  if (resource.data?.messages?.length) history.current.messages = resource.data.messages;
+  const history = useRef({messages:null,tail:'',commands:null,digest:null,seen:null});
+  const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, fast || kick ? 1000 : 5000, () => detailCursor(history.current));
+  if (resource.data && history.current.seen !== resource.data) {
+    history.current.seen = resource.data;
+    history.current.messages = mergeMessages(history.current.messages, resource.data);
+    if (resource.data.slash_commands) history.current.commands = resource.data.slash_commands;
+    history.current.digest = history.current.commands ? resource.data.slash_commands_digest : null;
+  }
   if (resource.data?.tail) history.current.tail = resource.data.tail;
   // Unreachable hosts may return an HTTP error for detail. The index still
   // carries authoritative lifecycle; never keep showing cached Alive controls.
   const observed = snapshot && ['ended','unreachable'].includes(lifecycle(snapshot)) ? {...resource.data,...snapshot} : resource.data || snapshot;
-  const s = observed ? {...observed, messages:observed.messages?.length ? observed.messages : history.current.messages, tail:observed.tail || history.current.tail} : null;
+  const s = observed ? {...observed, messages:history.current.messages || observed.messages, slash_commands:history.current.commands, tail:observed.tail || history.current.tail} : null;
   const native = s?.transport === 'native';
   const live = !!s && canControl(s);
   const pending = native ? !!s?.native_control : !!s?.menu;
@@ -560,7 +586,8 @@ function Workspace({ auth, logout }) {
   const [view, setView] = useState(location.hash.startsWith('#w-') ? 'workers' : 'inbox');
   const [selected, setSelected] = useState(sessionHash);
   const [online, setOnline] = useState(navigator.onLine);
-  const sessions = useResource('/api/sessions', 8000);
+  const [filter, setFilter] = usePreference('filter', 'active');
+  const sessions = useResource(listPath(filter), 8000);
   const preferences = useResource('/api/push/preferences');
   const [error, setError] = useState('');
   const muteLock = useRef(false);
@@ -584,7 +611,7 @@ function Workspace({ auth, logout }) {
     catch(e) { setError(e.message); } finally { muteLock.current = false; }
   } : null;
   return html`<div class=${`app ${selected && view === 'inbox' ? 'detail-open' : ''}`}><aside class="navigation"><a href="#" class="brand" aria-label="HQ home" onClick=${() => { setView('inbox'); open(null); }}><span class="brand-mark">hq<span/></span><span class="brand-caption">Your command center</span></a><nav aria-label="Main navigation">${[['inbox','Sessions'],['workers','Workers'],['routines','Routines'],['settings','Settings']].map(([id,label]) => html`<button class=${view === id ? 'active' : ''} aria-current=${view === id ? 'page' : undefined} onClick=${() => setView(id)}><${Icon} name=${id}/><span>${label}</span>${id === 'inbox' && sessions.data?.sessions.some(attention) && html`<i class="nav-dot"/>`}</button>`)}</nav><div class="nav-foot"><span class=${`connection-dot ${online ? '' : 'offline'}`}/>${online ? 'Workspace connected' : 'Device offline'}</div></aside>
-    <main class="workspace">${!online && html`<div class="offline-banner" role="status">You’re offline. Reconnect to refresh sessions or send a message.</div>`}<${ErrorNotice} message=${error}/>${view === 'inbox' ? html`<div class="session-layout"><${Inbox} resource=${sessions} selected=${selected} open=${open}/>${selected ? html`<${Detail} key=${selected} id=${selected} snapshot=${sessions.data?.sessions.find(s => s.id === selected)} back=${() => open(null)} refreshList=${sessions.reload} muted=${preferences.data?.muted.includes(selected)} toggleMute=${toggleMute}/>` : html`<div class="detail welcome"><div class="welcome-art" aria-hidden="true"><${Icon} name="terminal" size=${38}/></div><h2>A place for every session.</h2><p>Pick up a conversation, answer a question,<br/>or see how the work is coming along.</p><span>Select a session to get started</span></div>`}</div>` : view === 'settings' ? html`<${Settings} auth=${auth} logout=${logout}/>` : html`<${Operations} key=${view} view=${view}/>`}</main></div>`;
+    <main class="workspace">${!online && html`<div class="offline-banner" role="status">You’re offline. Reconnect to refresh sessions or send a message.</div>`}<${ErrorNotice} message=${error}/>${view === 'inbox' ? html`<div class="session-layout"><${Inbox} resource=${sessions} selected=${selected} open=${open} filter=${filter} setFilter=${setFilter}/>${selected ? html`<${Detail} key=${selected} id=${selected} snapshot=${sessions.data?.sessions.find(s => s.id === selected)} back=${() => open(null)} refreshList=${sessions.reload} muted=${preferences.data?.muted.includes(selected)} toggleMute=${toggleMute}/>` : html`<div class="detail welcome"><div class="welcome-art" aria-hidden="true"><${Icon} name="terminal" size=${38}/></div><h2>A place for every session.</h2><p>Pick up a conversation, answer a question,<br/>or see how the work is coming along.</p><span>Select a session to get started</span></div>`}</div>` : view === 'settings' ? html`<${Settings} auth=${auth} logout=${logout}/>` : html`<${Operations} key=${view} view=${view}/>`}</main></div>`;
 }
 function App() {
   const auth = useResource('/api/auth');

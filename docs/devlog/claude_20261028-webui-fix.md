@@ -55,10 +55,9 @@ five session details) through Playwright routing, not against live sessions.
 
 ## Not fixed (backend, out of this UI change)
 
-- `GET /api/sessions` returns ~840 KB every 8 s (all 571 rows) — needs a server
-  filter or delta.
-- A working native session's detail is ~1 MB (444 messages) and is polled every
-  second — needs an `after` cursor.
+- `GET /api/sessions` returns ~840 KB every 8 s (all 571 rows), and a working
+  native session's ~1 MB detail is polled every second. Fixed afterwards on this
+  branch: `docs/devlog/claude_20261028-incremental-polling.md`.
 - Native sessions are titled with random slugs (`dev-structured-reddy`) and
   grouped under "Remote Control"; no task summary was reported live.
 - A tmux transcript showed `/model` command output as user messages.
