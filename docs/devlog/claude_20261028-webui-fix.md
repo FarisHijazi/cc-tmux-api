@@ -77,3 +77,20 @@ scp src/cc_tmux_api/static/app.js src/cc_tmux_api/static/styles.css ftower:"$S/"
 
 Rollback: copy the `.before-webui-fix` files back. Restarting
 `cc-tmux-hq.service` is not needed for static files.
+
+## Follow-up: claude.ai mirror stuck "reconnecting"
+
+Live on 2026-10-28, 12 of 14 alive native sessions had upstream status
+`reconnecting` and no claude.ai URL, and the log showed `PoolTimeout`. A py-spy
+dump of the production hub showed about 50 mirror threads sharing one httpx
+client. Fifteen were blocked in httpcore `wait_for_connection` inside
+`bridge()`/`_register()`, and the rest were in retry backoff. No socket to the
+proxy was open, so the shared pool had leaked its slots and new mirror calls
+never ran.
+
+The fix gives each `_Link` its own client, closed in the pump's `finally`.
+Closing the client also aborts the listener's open stream, and the listener now
+checks `stop` on every line, keepalives included. A failed link can no longer
+starve the others, and an ended link frees its connections at once.
+`test_an_ended_mirror_releases_its_connections_while_others_keep_theirs` failed
+before the fix and passes after it.
