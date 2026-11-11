@@ -52,8 +52,8 @@ def _row(s: dict) -> dict:
     }
 
 
-def build(http_factory=client) -> MCPServer:
-    mcp = MCPServer("claude-sessions")
+def build(http_factory=client, **server_options) -> MCPServer:
+    mcp = MCPServer("claude-sessions", **server_options)
 
     def act(session_id: str, action: str, **fields) -> dict:
         with http_factory() as http:
@@ -116,5 +116,76 @@ def build(http_factory=client) -> MCPServer:
     return mcp
 
 
+def _secret(name: str) -> str:
+    value = os.environ.get(name, "")
+    path = os.environ.get(name + "_FILE", "")
+    return value or (Path(path).expanduser().read_text().strip() if path else "")
+
+
+class Verifier:
+    """Accepts a static bearer token (Claude Code clients) or an OIDC JWT access token (claude.ai connectors).
+
+    Every connector token must come from the issuer, carry the client id as audience, and name an allowed
+    email: this endpoint can type into shells on every machine, so a valid login alone is not enough.
+    """
+
+    def __init__(self, resource: str, issuer: str = "", client_id: str = "", emails=(), static: str = ""):
+        import jwt
+
+        self.jwt, self.resource, self.issuer, self.client_id = jwt, resource, issuer, client_id
+        self.emails = {e.strip().lower() for e in emails if e.strip()}
+        self.static = static
+        self.jwks = jwt.PyJWKClient(issuer.rstrip("/") + "/jwks/", headers={"User-Agent": "cc-tmux-mcp/1"}) if issuer else None
+
+    async def verify_token(self, token: str):
+        import asyncio
+        import hmac
+
+        from mcp.server.auth.provider import AccessToken
+
+        if self.static and hmac.compare_digest(token.encode(), self.static.encode()):
+            return AccessToken(token=token, client_id="static-token", scopes=[], resource=self.resource)
+        if not self.jwks or not self.emails:
+            return None
+        try:
+            key = await asyncio.to_thread(self.jwks.get_signing_key_from_jwt, token)
+            claims = self.jwt.decode(token, key.key, algorithms=["RS256", "ES256"], audience=self.client_id,
+                                     issuer=self.issuer)
+        except self.jwt.PyJWTError:
+            return None
+        if str(claims.get("email", "")).lower() not in self.emails:
+            return None
+        return AccessToken(token=token, client_id=self.client_id, scopes=claims.get("scope", "").split(),
+                           expires_at=int(claims["exp"]) if claims.get("exp") else None, resource=self.resource, subject=claims.get("sub"))
+
+
+def http_app():
+    from mcp.server.auth.settings import AuthSettings
+
+    public = os.environ["CC_TMUX_MCP_PUBLIC_URL"].rstrip("/")
+    issuer = os.environ.get("CC_TMUX_MCP_OIDC_ISSUER", "")
+    verifier = Verifier(f"{public}/mcp", issuer, os.environ.get("CC_TMUX_MCP_OIDC_CLIENT_ID", ""),
+                        os.environ.get("CC_TMUX_MCP_ALLOWED_EMAILS", "").split(","), _secret("CC_TMUX_MCP_TOKEN"))
+    if not verifier.static and not (verifier.jwks and verifier.emails):
+        raise SystemExit("Refusing to serve HTTP without CC_TMUX_MCP_TOKEN or an issuer plus allowed emails")
+    server = build(token_verifier=verifier,
+                   # the issuer puts the client id in aud, which Verifier checks itself
+                   auth=AuthSettings(issuer_url=issuer or public, resource_server_url=f"{public}/mcp",
+                                     validate_token_resource=False))
+    return server.streamable_http_app(stateless_http=True, host="0.0.0.0")
+
+
 def main():
-    build().run()
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--http", action="store_true", help="serve streamable HTTP with OAuth instead of stdio")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8392)
+    args = parser.parse_args()
+    if not args.http:
+        build().run()
+        return
+    import uvicorn
+
+    uvicorn.run(http_app(), host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips="*")

@@ -164,6 +164,14 @@ claude mcp add -s user claude-sessions \
 `CC_TMUX_HQ_TOKEN` (or `_FILE`) is the HQ's `CC_TMUX_TOKEN`, sent as a bearer token; omit it for a local
 token-less node. The aggregator must bind an address the caller can reach (`CC_TMUX_BIND`, `CC_TMUX_ALLOWED_HOSTS`).
 
+
+**Public, for claude.ai connectors.** `cc-tmux-mcp --http --host <addr> --port 8392` serves streamable HTTP at
+`/mcp`. Every request needs a bearer token: either `CC_TMUX_MCP_TOKEN` (or `_FILE`, for Claude Code clients) or an
+OIDC JWT access token from `CC_TMUX_MCP_OIDC_ISSUER` with audience `CC_TMUX_MCP_OIDC_CLIENT_ID` **and** an email in
+`CC_TMUX_MCP_ALLOWED_EMAILS`. It refuses to start with neither. `CC_TMUX_MCP_PUBLIC_URL` sets the resource URL served in
+`/.well-known/oauth-protected-resource/mcp`. Route `/mcp` and `/.well-known/oauth-protected-resource` around any
+forward-auth proxy. In claude.ai, add a custom connector with that URL and the issuer's public client id.
+
 ## Remote Control watchdog
 
 `cc-rc-watchdog` (run it every few minutes, e.g. a systemd user timer) keeps Remote Control connected on every

@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp>=2.3"]
+mcp = ["mcp>=2.3", "pyjwt[crypto]>=2.8"]
 
 [project.scripts]
 cc-tmux-api = "cc_tmux_api.cli:main"
