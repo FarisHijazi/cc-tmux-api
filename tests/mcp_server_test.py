@@ -77,3 +77,19 @@ def test_choose_option_and_interrupt(hq):
     call(server, "choose_option", session_id="b", index=1)
     call(server, "interrupt", session_id="b")
     assert [(p["action"], p.get("index")) for _, p in posted] == [("select", 1), ("interrupt", None)]
+
+
+def test_send_retries_with_a_fresh_revision_when_the_screen_moved():
+    attempts = []
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={**SESSIONS[1], "revision": f"r{len(attempts)}"})
+        attempts.append(json.loads(request.content)["revision"])
+        if len(attempts) < 3:
+            return httpx.Response(409, json={"detail": "Screen changed; refresh before acting"})
+        return httpx.Response(200, json={"ok": True})
+
+    server = mcp_server.build(lambda: httpx.Client(base_url="http://hq", transport=httpx.MockTransport(handler)))
+    assert call(server, "send_message", session_id="b", text="hi")["ok"]
+    assert attempts == ["r0", "r1", "r2"]

@@ -24,3 +24,9 @@ first dry run found 5 sessions without Remote Control and one bridged straight t
 run live on a throwaway session (the stale case simulated by pointing its session file at an unknown bridge id); the
 HQ then showed the new bridge alive, online, upstream `connected`. Tests: `tests/rc_watchdog_test.py` (fake CLI
 replaying the captured screens).
+
+**Limit found live: a working session can't be messaged.** The probe's `revision` hashes the whole screen tail, and a
+working session's spinner timer changes it every second. So `send` to a busy tmux session always returns 409
+("Screen changed"). The MCP now retries up to 5 times with a fresh revision, which covers ordinary screen churn but
+not a spinner. A real fix would normalise the spinner/elapsed-time line out of the revision in the HQ (Python and the
+Rust port), or send through the session's native Remote Control row when it is bridged through the HQ.

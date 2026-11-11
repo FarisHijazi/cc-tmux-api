@@ -11,6 +11,7 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 
 MESSAGE_CHARS = 4000
+STALE_RETRIES = 5
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
@@ -56,10 +57,14 @@ def build(http_factory=client) -> MCPServer:
 
     def act(session_id: str, action: str, **fields) -> dict:
         with http_factory() as http:
-            detail = _get(http, f"/api/sessions/{session_id}")
-            body = {"action": action, "revision": detail["revision"],
-                    "request_id": uuid.uuid4().hex, **fields}
-            response = http.post(f"/api/sessions/{session_id}/action", json=body)
+            for _ in range(STALE_RETRIES):
+                detail = _get(http, f"/api/sessions/{session_id}")
+                body = {"action": action, "revision": detail["revision"],
+                        "request_id": uuid.uuid4().hex, **fields}
+                response = http.post(f"/api/sessions/{session_id}/action", json=body)
+                # A 409 stale revision is rejected before delivery, so a fresh read and resend is safe.
+                if response.status_code != 409 or "refresh" not in response.text:
+                    break
             if response.status_code >= 400:
                 raise RuntimeError(f"{action} failed with {response.status_code}: {response.text[:300]}")
             return {"ok": True, "session": _row(detail)}
