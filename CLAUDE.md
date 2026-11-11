@@ -17,3 +17,4 @@ The `cc-tmux-mcp` MCP server (`src/cc_tmux_api/mcp_server.py`, `[mcp]` extra, mc
 HTTP client of an HQ; keep fleet logic in the HQ, never in the MCP. Deployment: `docs/devlog/claude_20261111-mcp-and-hub-fix.md`.
 `cc-rc-watchdog` (`src/cc_tmux_api/rc_watchdog.py`) detects from session files + HQ health, never from screen text;
 it types only into idle sessions with an empty prompt. Same devlog.
+Public `/mcp` on cchq.fhijazi.com: OIDC JWT + email allowlist, or static token; never route `/api` around SSO.

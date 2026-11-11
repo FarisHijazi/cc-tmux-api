@@ -30,3 +30,18 @@ working session's spinner timer changes it every second. So `send` to a busy tmu
 ("Screen changed"). The MCP now retries up to 5 times with a fresh revision, which covers ordinary screen churn but
 not a spinner. A real fix would normalise the spinner/elapsed-time line out of the revision in the HQ (Python and the
 Rust port), or send through the session's native Remote Control row when it is bridged through the HQ.
+
+**Public MCP for claude.ai (2026-11-11).** `cc-tmux-mcp --http` runs on ftower as `cc-tmux-mcp.service` (user unit,
+`172.17.0.1:8392`, uvx pinned to a commit) and talks to the aggregator on 127.0.0.1. Traefik router `cchq-mcp@file`
+(appended to `provision/traefik/config/cchq.yml`, backup `cchq.yml.before-mcp-20261111`, priority 1000) sends
+`cchq.fhijazi.com/mcp` and `/.well-known/oauth-protected-resource*` around Authentik forward-auth; the dashboard and
+`/api` still redirect to SSO. Auth, both required for a connector: an Authentik JWT from application `cc-sessions-mcp`
+(public PKCE client, claude.ai/claude.com callbacks, 1 h access / 30 d refresh, policy binding: user `akadmin` only),
+and the `email` claim in `CC_TMUX_MCP_ALLOWED_EMAILS`. Claude Code clients on other VMs use the static
+`~/.config/cc-tmux-api/mcp-token` instead of the hub token. Verified from outside: no token 401 with
+`resource_metadata`, wrong token 401, static token lists 26 sessions on 5 hosts. Not verified: a real claude.ai
+connector sign-in (needs the owner's login). Rollback: `systemctl --user disable --now cc-tmux-mcp`, restore
+`cchq.yml.before-mcp-20261111`, delete Authentik application/provider `cc-sessions-mcp`.
+
+**Work VMs.** The two work VMs (one on a separate tailnet that cannot reach ftower) use the public MCP: HTTP transport with the
+static token, and the watchdog reads health through the `remote_control_health` tool (`CC_RC_WATCHDOG_MCP_URL`).
