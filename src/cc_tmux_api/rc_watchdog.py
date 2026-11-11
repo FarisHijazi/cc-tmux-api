@@ -185,18 +185,45 @@ def hub_snapshot() -> dict:
     return response.json()
 
 
-def unhealthy(snapshot_fn=hub_snapshot, sessions_fn=local_sessions) -> dict[int, tuple[Session, str]]:
-    health = bridge_health(snapshot_fn())
+def mcp_health() -> dict[str, bool]:
+    """Health through the public claude-sessions MCP, for machines that cannot reach the HQ directly."""
+    import asyncio
+
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    token = os.environ.get("CC_TMUX_MCP_TOKEN") or Path(os.environ["CC_TMUX_MCP_TOKEN_FILE"]).expanduser().read_text().strip()
+
+    async def call():
+        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=60) as http:
+            async with streamable_http_client(os.environ["CC_RC_WATCHDOG_MCP_URL"], http_client=http) as (r, w, *_):
+                async with ClientSession(r, w) as session:
+                    await session.initialize()
+                    result = await session.call_tool("remote_control_health", {})
+                    if result.is_error:
+                        raise RuntimeError(str(result.content)[:200])
+                    data = result.structured_content or json.loads(result.content[0].text)
+                    return data.get("result", data)
+
+    return asyncio.run(call())
+
+
+def health_now() -> dict[str, bool]:
+    return mcp_health() if os.environ.get("CC_RC_WATCHDOG_MCP_URL") else bridge_health(hub_snapshot())
+
+
+def unhealthy(health_fn=health_now, sessions_fn=local_sessions) -> dict[int, tuple[Session, str]]:
+    health = health_fn()
     return {s.pid: (s, kind) for s in sessions_fn() if (kind := diagnose(s, health))}
 
 
-def run_once(snapshot_fn=hub_snapshot, sessions_fn=local_sessions, repairer=None, confirm_after=30.0,
+def run_once(health_fn=health_now, sessions_fn=local_sessions, repairer=None, confirm_after=30.0,
              sleep=time.sleep, dry_run=False) -> list[dict]:
-    first = unhealthy(snapshot_fn, sessions_fn)
+    first = unhealthy(health_fn, sessions_fn)
     if not first:
         return []
     sleep(confirm_after)
-    second = unhealthy(snapshot_fn, sessions_fn)
+    second = unhealthy(health_fn, sessions_fn)
     repairer = repairer or Repairer()
     results = []
     for pid, (session, kind) in second.items():

@@ -93,3 +93,11 @@ def test_send_retries_with_a_fresh_revision_when_the_screen_moved():
     server = mcp_server.build(lambda: httpx.Client(base_url="http://hq", transport=httpx.MockTransport(handler)))
     assert call(server, "send_message", session_id="b", text="hi")["ok"]
     assert attempts == ["r0", "r1", "r2"]
+
+
+def test_remote_control_health_reports_native_bridges():
+    snap = {"sessions": [{"session": "cse_1", "transport": "native", "alive": True, "online": True,
+                          "upstream": {"status": "connected"}}, {"session": "pane", "alive": True}]}
+    server = mcp_server.build(lambda: httpx.Client(base_url="http://hq", transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json=snap))))
+    assert call(server, "remote_control_health") == {"cse_1": True}

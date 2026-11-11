@@ -123,7 +123,7 @@ def test_run_once_repairs_only_sessions_unhealthy_on_both_checks(file, tmp_path)
     FakeCli(flaky, connected=False)
     sessions = [session(file), wd.Session(**{**session(flaky).__dict__, "pid": 456})]
     calls = iter([sessions, sessions[:1]])
-    results = wd.run_once(snapshot_fn=lambda: {"sessions": []}, sessions_fn=lambda: next(calls),
+    results = wd.run_once(health_fn=lambda: {}, sessions_fn=lambda: next(calls),
                           repairer=repairer(cli), sleep=lambda s: None)
     assert [(r["pid"], r["result"]) for r in results] == [(os.getpid(), "repaired")]
 

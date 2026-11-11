@@ -113,6 +113,14 @@ def build(http_factory=client, **server_options) -> MCPServer:
         """Interrupt (Escape) whatever the session is doing."""
         return act(session_id, "interrupt")
 
+    @mcp.tool()
+    def remote_control_health() -> dict[str, bool]:
+        """Remote Control bridges the HQ knows, keyed by bridge id (cse_...): true when alive, online and mirrored."""
+        from cc_tmux_api.rc_watchdog import bridge_health
+
+        with http_factory() as http:
+            return bridge_health(_get(http, "/api/sessions"))
+
     return mcp
 
 
