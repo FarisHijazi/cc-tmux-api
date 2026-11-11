@@ -13,3 +13,5 @@ The native-first UI and the Remote Control protocol as claude.ai uses it (captur
 requests, parity table) are in `docs/devlog/claude_20261023-native-ui-and-rc-protocol.md`.
 The claude.ai upstream mirror (design, protocol mapping, test coverage, what is not
 verified live) is in `docs/devlog/claude_20261023-upstream-mirror.md`.
+The `cc-tmux-mcp` MCP server (`src/cc_tmux_api/mcp_server.py`, `[mcp]` extra, mcp SDK 2.x `MCPServer`) is a thin
+HTTP client of an HQ; keep fleet logic in the HQ, never in the MCP. Deployment: `docs/devlog/claude_20261111-mcp-and-hub-fix.md`.

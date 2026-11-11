@@ -148,6 +148,22 @@ requires an eligible account and OS permissions; protocol/UI tests alone do not
 establish that it works on a particular machine. See
 [computer-use validation](docs/devlog/claude_20261018-native-computer-use.md).
 
+## MCP server (talk to every session from Claude)
+
+`cc-tmux-mcp` is a stdio MCP server over any HQ's HTTP API, so one Claude Code session can list, read and
+message every session that HQ federates (all VMs when pointed at the aggregator). Tools: `list_sessions`,
+`read_session`, `send_message`, `choose_option`, `interrupt`. Writes go through the HQ's normal guarded
+`/action` path (current revision, fresh request id).
+
+```bash
+claude mcp add -s user claude-sessions \
+  -e CC_TMUX_HQ_URL=http://<aggregator>:8389 -e CC_TMUX_HQ_TOKEN_FILE=~/.config/cc-tmux-api/hub-token \
+  -- uvx --from 'cc-tmux-api[mcp] @ git+https://github.com/FarisHijazi/cc-tmux-api' cc-tmux-mcp
+```
+
+`CC_TMUX_HQ_TOKEN` (or `_FILE`) is the HQ's `CC_TMUX_TOKEN`, sent as a bearer token; omit it for a local
+token-less node. The aggregator must bind an address the caller can reach (`CC_TMUX_BIND`, `CC_TMUX_ALLOWED_HOSTS`).
+
 ## Worker API
 
 ```text

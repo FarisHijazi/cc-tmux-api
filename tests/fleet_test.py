@@ -13,6 +13,7 @@ from cc_tmux_api import fleet
 from cc_tmux_api import fleet_probe as probe
 
 REAL_PROBE = fleet._probe
+REAL_NOTIFY_LIBRARY = probe.notify_library
 
 SID = '11111111-2222-4333-8444-555555555555'
 OTHER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -777,3 +778,25 @@ def test_transcript_status_is_explicit_without_fabricated_messages(tmp_path, mon
     result = probe.public(data, full=True)
     assert result['transcript_status'] == expected
     assert result['messages'] == ([{'role': 'assistant', 'text': 'real answer'}] if expected == 'available' else [])
+
+
+def test_notify_library_skips_registry_paths_it_cannot_read(tmp_path, monkeypatch):
+    locked = tmp_path / 'root-only'
+    locked.mkdir()
+    registry = tmp_path / '.claude' / 'plugins' / 'installed_plugins.json'
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({'plugins': {'cc-notify@x': [{'installPath': str(locked / 'cc-notify')}]}}))
+    fallback = tmp_path / '.claude' / 'hooks' / 'cc-lib.sh'
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text('')
+    monkeypatch.setattr(probe.shutil, 'which', lambda name: None)
+    monkeypatch.setattr(probe.Path, 'home', classmethod(lambda cls: tmp_path))
+    real_is_file = probe.Path.is_file
+
+    def is_file(self):
+        if str(self).startswith(str(locked)):
+            raise PermissionError(13, 'Permission denied', str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(probe.Path, 'is_file', is_file)
+    assert REAL_NOTIFY_LIBRARY() == fallback
