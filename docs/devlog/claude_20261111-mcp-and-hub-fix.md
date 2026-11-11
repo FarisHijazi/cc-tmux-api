@@ -16,3 +16,11 @@ listed 22 live sessions on four hosts, including Remote Control.
 `~/.local/share/cc-tmux-api/releases/`. `hq.json` gained `100.103.162.14` (ftower tailnet) in `CC_TMUX_BIND` and
 `CC_TMUX_ALLOWED_HOSTS` so other VMs reach it with the bearer token. Backups: `cc-tmux-hq.service.before-mcp-20261111`,
 `hq.json.before-mcp-20261111`. Rollback: restore both, `daemon-reload`, restart `cc-tmux-hq`.
+
+**Remote Control watchdog.** Live on Claude Code 2.1.322: `/remote-control` while connected opens a dialog
+(Disconnect this session / Show QR code / Continue, default Continue), which is why typing it "does nothing".
+Disconnect clears `bridgeSessionId` in `sessions/<pid>.json`; the next `/remote-control` writes a new id. On dev the
+first dry run found 5 sessions without Remote Control and one bridged straight to Anthropic. Both repair paths were
+run live on a throwaway session (the stale case simulated by pointing its session file at an unknown bridge id); the
+HQ then showed the new bridge alive, online, upstream `connected`. Tests: `tests/rc_watchdog_test.py` (fake CLI
+replaying the captured screens).

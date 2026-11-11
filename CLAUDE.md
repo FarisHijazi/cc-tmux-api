@@ -15,3 +15,5 @@ The claude.ai upstream mirror (design, protocol mapping, test coverage, what is 
 verified live) is in `docs/devlog/claude_20261023-upstream-mirror.md`.
 The `cc-tmux-mcp` MCP server (`src/cc_tmux_api/mcp_server.py`, `[mcp]` extra, mcp SDK 2.x `MCPServer`) is a thin
 HTTP client of an HQ; keep fleet logic in the HQ, never in the MCP. Deployment: `docs/devlog/claude_20261111-mcp-and-hub-fix.md`.
+`cc-rc-watchdog` (`src/cc_tmux_api/rc_watchdog.py`) detects from session files + HQ health, never from screen text;
+it types only into idle sessions with an empty prompt. Same devlog.

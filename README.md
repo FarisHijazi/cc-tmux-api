@@ -164,6 +164,16 @@ claude mcp add -s user claude-sessions \
 `CC_TMUX_HQ_TOKEN` (or `_FILE`) is the HQ's `CC_TMUX_TOKEN`, sent as a bearer token; omit it for a local
 token-less node. The aggregator must bind an address the caller can reach (`CC_TMUX_BIND`, `CC_TMUX_ALLOWED_HOSTS`).
 
+## Remote Control watchdog
+
+`cc-rc-watchdog` (run it every few minutes, e.g. a systemd user timer) keeps Remote Control connected on every
+launcher-routed interactive Claude Code session in this machine's tmux. It reads `<profile>/sessions/<pid>.json`
+(tmux pane, `bridgeSessionId`) and asks the HQ (`CC_TMUX_HQ_URL`/`_TOKEN_FILE`, as for the MCP) whether each bridge is
+alive, online and mirrored. A session unhealthy on two checks 30 s apart is repaired, only when idle with an empty
+prompt: no bridge means one `/remote-control`; a stale bridge means `/remote-control` (the CLI's toggle opens a dialog
+when it thinks it is connected), **Disconnect this session**, then `/remote-control` again, which issues a new bridge
+id. Bridges straight to Anthropic (non-hex ids) are not judged. `--dry-run` reports without typing.
+
 ## Worker API
 
 ```text
