@@ -36,7 +36,7 @@ Rust port), or send through the session's native Remote Control row when it is b
 (appended to `provision/traefik/config/cchq.yml`, backup `cchq.yml.before-mcp-20261111`, priority 1000) sends
 `cchq.fhijazi.com/mcp` and `/.well-known/oauth-protected-resource*` around Authentik forward-auth; the dashboard and
 `/api` still redirect to SSO. Auth, both required for a connector: an Authentik JWT from application `cc-sessions-mcp`
-(public PKCE client, claude.ai/claude.com callbacks, 1 h access / 30 d refresh, policy binding: user `akadmin` only),
+(public PKCE client, claude.ai/claude.com callbacks, 1 h access / 30 d refresh, policy bindings: the owner's two personal Authentik users only),
 and the `email` claim in `CC_TMUX_MCP_ALLOWED_EMAILS`. Claude Code clients on other VMs use the static
 `~/.config/cc-tmux-api/mcp-token` instead of the hub token. Verified from outside: no token 401 with
 `resource_metadata`, wrong token 401, static token lists 26 sessions on 5 hosts. Not verified: a real claude.ai
