@@ -134,6 +134,7 @@ class WorkerAction(BaseModel):
     title: str | None = None
     prompt: str | None = None
     workdir: str | None = None
+    env: dict[str, str] | None = None  # spawn: the worker's own env, kept for revive
     session: str | None = None
     text: str | None = None
     session_id: str | None = None
@@ -290,7 +291,10 @@ def create_app() -> FastAPI:
         if req.action == "spawn":
             if not (req.title and req.prompt):
                 return {"ok": False, "output": "title and prompt required"}
-            info = workers.spawn(req.title.strip(), req.prompt, req.workdir or None)
+            try:
+                info = workers.spawn(req.title.strip(), req.prompt, req.workdir or None, env=req.env)
+            except ValueError as e:
+                return {"ok": False, "output": str(e)}
             return {"ok": True, **info}
         if req.action == "send":
             if not all((req.session, req.text, req.session_id, req.revision, req.request_id)):
