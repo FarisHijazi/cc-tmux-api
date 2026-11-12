@@ -45,3 +45,10 @@ connector sign-in (needs the owner's login). Rollback: `systemctl --user disable
 
 **Work VMs.** The two work VMs (one on a separate tailnet that cannot reach ftower) use the public MCP: HTTP transport with the
 static token, and the watchdog reads health through the `remote_control_health` tool (`CC_RC_WATCHDOG_MCP_URL`).
+
+## 2026-11-12: watchdog retyped a failing toggle every 5 minutes
+
+A stale-bridge repair on dev disconnected one live session, and its second `/remote-control` never produced a bridge
+id. Every later run typed `/remote-control` again: 150 times overnight, each landing in that conversation's
+transcript. Now a process whose submitted toggle failed goes into `gave-up.json` and is skipped until it exits.
+Why that session's toggle yields no bridge id is not yet known.

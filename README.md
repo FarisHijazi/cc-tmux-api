@@ -180,7 +180,8 @@ launcher-routed interactive Claude Code session in this machine's tmux. It reads
 alive, online and mirrored. A session unhealthy on two checks 30 s apart is repaired, only when idle with an empty
 prompt: no bridge means one `/remote-control`; a stale bridge means `/remote-control` (the CLI's toggle opens a dialog
 when it thinks it is connected), **Disconnect this session**, then `/remote-control` again, which issues a new bridge
-id. Bridges straight to Anthropic (non-hex ids) are not judged. `--dry-run` reports without typing.
+id. Bridges straight to Anthropic (non-hex ids) are not judged. A process where a typed toggle failed is not retried
+(listed in `~/.local/state/cc-rc-watchdog/gave-up.json` until it exits). `--dry-run` reports without typing.
 
 ## Worker API
 

@@ -125,6 +125,7 @@ def highlighted(lines: list[str]) -> str:
 class Repairer:
     def __init__(self, tmux=None, sleep=time.sleep, reread=read_session, settle=1.0, wait=25.0):
         self.tmux, self.sleep, self.reread, self.settle, self.wait = tmux or Tmux(), sleep, reread, settle, wait
+        self.typed = False
 
     def _toggle(self, pane: str) -> list[str]:
         self.tmux.keys(pane, "/remote-control", literal=True)
@@ -134,6 +135,7 @@ class Repairer:
             self.tmux.keys(pane, "C-u")
             raise RuntimeError("autocomplete did not offer /remote-control")
         self.tmux.keys(pane, "Enter")
+        self.typed = True
         self.sleep(self.settle * 2)
         return self.tmux.capture(pane)
 
@@ -162,6 +164,7 @@ class Repairer:
             self.sleep(self.settle)
 
     def repair(self, session: Session, kind: str) -> str:
+        self.typed = False
         if session.status != "idle":
             raise RuntimeError(f"session is {session.status}, not idle")
         if not prompt_is_empty(self.tmux.capture(session.pane)):
@@ -217,8 +220,19 @@ def unhealthy(health_fn=health_now, sessions_fn=local_sessions) -> dict[int, tup
     return {s.pid: (s, kind) for s in sessions_fn() if (kind := diagnose(s, health))}
 
 
+GAVE_UP = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "cc-rc-watchdog/gave-up.json"
+
+
+def _load_gave_up(path: Path) -> set[int]:
+    try:
+        return {pid for pid in json.loads(path.read_text()) if _alive(pid)}
+    except (OSError, ValueError):
+        return set()
+
+
 def run_once(health_fn=health_now, sessions_fn=local_sessions, repairer=None, confirm_after=30.0,
-             sleep=time.sleep, dry_run=False) -> list[dict]:
+             sleep=time.sleep, dry_run=False, gave_up_file: Path = GAVE_UP) -> list[dict]:
+    gave_up = _load_gave_up(gave_up_file)
     first = unhealthy(health_fn, sessions_fn)
     if not first:
         return []
@@ -230,6 +244,9 @@ def run_once(health_fn=health_now, sessions_fn=local_sessions, repairer=None, co
         if pid not in first:
             continue
         row = {"pid": pid, "pane": session.pane, "name": session.name, "kind": kind}
+        if pid in gave_up:
+            results.append({**row, "result": "skipped: an earlier repair failed in this process"})
+            continue
         if dry_run:
             results.append({**row, "result": "dry-run"})
             continue
@@ -238,7 +255,12 @@ def run_once(health_fn=health_now, sessions_fn=local_sessions, repairer=None, co
             row["bridge"] = repairer.repair(session, kind)
         except (RuntimeError, subprocess.CalledProcessError) as exc:
             row["result"] = f"skipped: {exc}"
+            if repairer.typed:
+                gave_up.add(pid)
         results.append(row)
+    if not dry_run:
+        gave_up_file.parent.mkdir(parents=True, exist_ok=True)
+        gave_up_file.write_text(json.dumps(sorted(gave_up)))
     return results
 
 

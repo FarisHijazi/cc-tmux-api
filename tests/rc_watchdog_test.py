@@ -16,8 +16,9 @@ DIALOG = ["   Remote Control", "     Disconnect this session", "     Show QR cod
 class FakeCli:
     """Models the CLI: /remote-control toggles; when connected it opens the dialog."""
 
-    def __init__(self, file, connected, screen=IDLE):
+    def __init__(self, file, connected, screen=IDLE, bridges=True):
         self.file, self.connected, self.screen, self.typed, self.sent = file, connected, list(screen), "", []
+        self.bridges = bridges
         self.cursor = 2
         self.next_id = iter(f"session_{n:032x}" for n in range(1, 99))
         self._write(self.connected and "session_" + "a" * 32)
@@ -56,8 +57,8 @@ class FakeCli:
             if self.connected:
                 self.screen, self.cursor = DIALOG, 2
             else:
-                self.connected = True
-                self._write(next(self.next_id))
+                self.connected = self.bridges
+                self._write(self.bridges and next(self.next_id))
 
 
 def session(file):
@@ -124,8 +125,18 @@ def test_run_once_repairs_only_sessions_unhealthy_on_both_checks(file, tmp_path)
     sessions = [session(file), wd.Session(**{**session(flaky).__dict__, "pid": 456})]
     calls = iter([sessions, sessions[:1]])
     results = wd.run_once(health_fn=lambda: {}, sessions_fn=lambda: next(calls),
-                          repairer=repairer(cli), sleep=lambda s: None)
+                          repairer=repairer(cli), sleep=lambda s: None, gave_up_file=tmp_path / "g.json")
     assert [(r["pid"], r["result"]) for r in results] == [(os.getpid(), "repaired")]
+
+
+def test_a_failed_toggle_is_never_retyped_into_the_same_process(file, tmp_path):
+    cli = FakeCli(file, connected=False, bridges=False)
+    run = lambda: wd.run_once(health_fn=lambda: {}, sessions_fn=lambda: [session(file)], repairer=repairer(cli),
+                              sleep=lambda s: None, gave_up_file=tmp_path / "g.json")
+    assert "no new bridge" in run()[0]["result"]
+    typed = len(cli.sent)
+    assert "earlier repair failed" in run()[0]["result"]
+    assert len(cli.sent) == typed
 
 
 def test_ignores_dead_and_non_interactive_sessions(tmp_path):
