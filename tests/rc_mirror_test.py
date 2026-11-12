@@ -503,3 +503,31 @@ def test_failed_first_state_put_is_retried_and_stream_still_opens(hub):
     mirrored(hub)
     puts = wait_for(lambda: len(fake.calls("PUT", "/worker")) >= 2 and fake.calls("PUT", "/worker"))
     assert puts[1]["body"] == {"worker_epoch": 1, "worker_status": "idle", "external_metadata": {}}
+
+
+class CountingTransport(httpx.MockTransport):
+    def __init__(self, handler):
+        super().__init__(handler)
+        self.closes = 0
+
+    def close(self):
+        self.closes += 1
+
+
+def test_an_ended_mirror_releases_its_connections_while_others_keep_theirs(hub):
+    # Live, every mirror shared one connection pool; links that stopped kept their slots until the pool
+    # was full and every other session's registration waited forever ("reconnecting", no claude.ai URL).
+    backend, client, launch, fake = hub
+    transport = CountingTransport(fake.handle)
+    backend.upstream.close()
+    backend.upstream = Mirror(backend, transport=transport, base_url="https://upstream.test",
+                              backoff=0.01, max_backoff=0.05)
+    sid, auth, epoch = register(native(hub))
+    wait_for(lambda: backend.detail(sid)["upstream"]["status"] == "connected")
+    fake.fail("PUT", "/worker", 404)
+    client.put(f"/v1/code/sessions/{sid}/worker", headers=auth,
+               json={"worker_epoch": epoch, "worker_status": "running"})
+    wait_for(lambda: backend.detail(sid)["upstream"]["status"] == "ended")
+    wait_for(lambda: transport.closes >= 1)
+    other, _, _ = register(native(hub), "Second")
+    wait_for(lambda: backend.detail(other).get("upstream"))

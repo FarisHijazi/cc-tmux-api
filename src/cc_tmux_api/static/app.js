@@ -1,7 +1,7 @@
 // HQ frontend. API assumptions: docs/mobile-control-research.md and the mobile
 // session contract. Actions are never queued or retried. Only shell assets cache.
 import { h, render } from './vendor/preact.mjs';
-import { useState, useEffect, useRef, useMemo } from './vendor/hooks.mjs';
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from './vendor/hooks.mjs';
 import htm from './vendor/htm.mjs';
 // Upstream distributions: marked 18.1.0 (marked.js.org), DOMPurify 3.4.16
 // (github.com/cure53/DOMPurify). Licenses are alongside the vendored modules.
@@ -46,18 +46,22 @@ async function api(path, body, method = body === undefined ? 'GET' : 'POST') {
   }
   return data;
 }
-function useResource(path, interval = 0) {
+// `query` is read at request time, so an incremental cursor never resets the resource.
+function useResource(path, interval = 0, query = null) {
   const [state, setState] = useState({ data: null, error: '', hasLoaded: false, loading: true });
   const generation = useRef(0);
   const active = useRef(true);
   const inFlight = useRef(false);
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const reload = async () => {
     if (!path) return;
     inFlight.current = true;
     const run = ++generation.current;
     setState(s => ({ ...s, loading: true }));
     try {
-      const data = await api(path);
+      const params = queryRef.current ? new URLSearchParams(queryRef.current()).toString() : '';
+      const data = await api(params ? `${path}${path.includes('?') ? '&' : '?'}${params}` : path);
       if (active.current && run === generation.current) setState({ data, error: '', hasLoaded: true, loading: false });
       return data;
     } catch (e) {
@@ -114,7 +118,7 @@ function ActionLabel({ session }) {
   return html`<span class="action-label">${label}</span>`;
 }
 function Status({ session }) {
-  return html`<span class=${`status ${attention(session) ? 'attention' : canControl(session) && /working|running|tool/.test(session.status) ? 'working' : ''}`}>${session.status_emoji ? html`<span class="status-emoji">${session.status_emoji}</span>` : html`<i aria-hidden="true"/>`}<span>${['ended','unreachable'].includes(lifecycle(session)) && html`<span class="status-history">Last activity: </span>`}${session.status_label || session.status || 'Unknown'}</span></span>`;
+  return html`<span class=${`status ${attention(session) ? 'attention' : working(session) ? 'working' : ''}`}>${session.status_emoji ? html`<span class="status-emoji">${session.status_emoji}</span>` : html`<i aria-hidden="true"/>`}<span>${['ended','unreachable'].includes(lifecycle(session)) && html`<span class="status-history">Last activity: </span>`}${session.status_label || session.status || 'Unknown'}</span></span>`;
 }
 function when(value) {
   if (!value) return 'Time unavailable';
@@ -148,35 +152,55 @@ function displayHostLabel(label) {
 }
 function readDraft(id) { try { return localStorage.getItem(`hq:draft:${id}`) || ''; } catch { return ''; } }
 function saveDraft(id, text) { try { if (text) localStorage.setItem(`hq:draft:${id}`, text); else localStorage.removeItem(`hq:draft:${id}`); return true; } catch { return false; } }
+function usePreference(name, fallback) {
+  const [value, setValue] = useState(() => { try { return localStorage.getItem(`hq:pref:${name}`) || fallback; } catch { return fallback; } });
+  return [value, next => { setValue(next); try { localStorage.setItem(`hq:pref:${name}`, next); } catch {} }];
+}
 function sessionHash() { return new URLSearchParams(location.hash.slice(1)).get('session'); }
-function Inbox({ resource, selected, open }) {
+const working = s => canControl(s) && /working|running|tool/i.test(s.status || '');
+const rank = s => attention(s) ? 0 : working(s) ? 1 : lifecycle(s) === 'ended' ? 3 : 2;
+const recency = s => Number(lifecycle(s) === 'ended' ? s.ended_at : s.updated_at || s.last_seen) || 0;
+const byPriority = (a, b) => rank(a) - rank(b) || recency(b) - recency(a) || String(a.title || a.session).localeCompare(String(b.title || b.session));
+const ROW_PAGE = 60;
+function SessionRow({ s, group, selected, open }) {
+  const state = lifecycle(s);
+  return html`<button class=${`session-row ${s.id === selected ? 'selected' : ''}`} onClick=${() => open(s.id)} aria-current=${s.id === selected ? 'true' : undefined}><span class=${`session-mark ${attention(s) ? 'needs-you' : working(s) ? 'working' : ''}`}><${Icon} name=${attention(s) ? 'bell' : 'terminal'} size=${16}/></span><span class="session-main"><span class="row-top"><span class="row-title" dir="auto">${s.title || s.session}</span><span class="row-time">${state === 'ended' ? endedDate(s.ended_at) : state === 'unreachable' ? `Last seen ${when(s.last_seen)}` : when(s.updated_at)}</span></span><span class="row-bottom"><${Status} session=${s}/><span class="row-directory" dir="auto">${group === 'host' ? s.workdir || s.session : displayHostLabel(s.host_label || s.host)}</span>${(state !== 'alive' || attention(s)) && html`<span class="row-lifecycle">${state !== 'alive' && html`<${Lifecycle} session=${s}/>`}<${ActionLabel} session=${s}/></span>`}</span></span></button>`;
+}
+// Ended rows are most of the fleet; fetch them only for the filters that show them.
+const listPath = filter => ['ended','all'].includes(filter) ? '/api/sessions' : '/api/sessions?ended=0';
+function Inbox({ resource, selected, open, filter, setFilter }) {
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState('all');
-  const [group, setGroup] = useState('host');
+  const [group, setGroup] = usePreference('group', 'host');
+  const [limit, setLimit] = useState(ROW_PAGE);
+  useEffect(() => setLimit(ROW_PAGE), [query, filter, group]);
   const sessions = resource.data?.sessions || [];
-  const endedCount = sessions.filter(s => lifecycle(s) === 'ended').length;
-  const activeCount = sessions.length - endedCount;
+  const endedCount = resource.data?.ended_count ?? sessions.filter(s => lifecycle(s) === 'ended').length;
+  const activeCount = sessions.filter(s => lifecycle(s) !== 'ended').length;
   const displayHosts = leafHosts(resource.data?.hosts || []);
   const unavailable = displayHosts.some(host => !host.available);
   const needing = sessions.filter(attention).length;
-  const matching = sessions.filter(s => (!query || [s.title, s.host_label, s.workdir, s.session].join(' ').toLowerCase().includes(query.toLowerCase())) && (filter === 'all' || (filter === 'active' ? lifecycle(s) !== 'ended' : filter === 'ended' ? lifecycle(s) === 'ended' : filter === 'attention' ? attention(s) : canControl(s) && /working|running|tool/i.test(s.status))));
+  const matching = sessions.filter(s => (!query || [s.title, s.host_label, s.workdir, s.session].join(' ').toLowerCase().includes(query.toLowerCase())) && (filter === 'all' || (filter === 'active' ? lifecycle(s) !== 'ended' : filter === 'ended' ? lifecycle(s) === 'ended' : filter === 'attention' ? attention(s) : working(s))));
   const groups = new Map();
-  matching.sort((a,b) => Number(attention(b)) - Number(attention(a)) || String(a.title || a.session).localeCompare(String(b.title || b.session))).forEach(s => {
+  matching.sort(byPriority).forEach(s => {
     const key = group === 'host' ? s.host_label || s.host : s.workdir || 'Directory unavailable';
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(s);
   });
-  const ordered = [...groups].sort((a,b) => Number(b[1].some(attention)) - Number(a[1].some(attention)));
+  // Rendering hundreds of ended rows on every poll makes phones janky; page them.
+  let budget = limit;
+  const ordered = [...groups].sort((a,b) => byPriority(a[1][0], b[1][0])).map(([name, rows]) => { const shown = rows.slice(0, Math.max(0, budget)); budget -= shown.length; return [name, rows, shown]; }).filter(([, , shown]) => shown.length);
+  const hidden = matching.length - Math.min(limit, matching.length);
   return html`<section class="inbox" aria-label="Session inbox">
-    <div class="inbox-heading"><div><div class="eyeline">Your workspace, within reach</div><h1>Sessions ${resource.data && !(unavailable && !sessions.length) && html`<span class="total">${filter === 'ended' ? endedCount : activeCount}<small>${filter === 'ended' ? 'ended' : 'active'}</small></span>`}</h1></div><button class="icon-button" aria-label="Refresh sessions" onClick=${resource.reload} disabled=${resource.loading}><${Icon} name="refresh"/></button></div>
-    <div class="inbox-tools"><label class="search"><${Icon} name="search"/><input type="search" aria-label="Search sessions" placeholder="Search sessions, hosts, folders" value=${query} onInput=${e => setQuery(e.target.value)}/></label>
-    <div class="filters" aria-label="Filter sessions">${[['all','All sessions'],['active','Active'],['ended','Ended'],['attention','Needs you'],['working','Working']].map(([id,label]) => html`<button class=${filter === id ? 'active' : ''} aria-pressed=${filter === id} onClick=${() => setFilter(id)}>${label}${id === 'attention' && resource.data && needing > 0 && html`<span class="filter-count">${needing}</span>`}</button>`)}</div>
+    <div class="inbox-heading"><h1>Sessions ${resource.data && !(unavailable && !sessions.length) && html`<span class="total">${filter === 'ended' ? endedCount : activeCount}<small>${filter === 'ended' ? 'ended' : 'active'}</small></span>`}</h1><button class="icon-button" aria-label="Refresh sessions" onClick=${resource.reload} disabled=${resource.loading}><${Icon} name="refresh"/></button></div>
+    <div class="inbox-tools"><label class="search"><${Icon} name="search" size=${18}/><input type="search" aria-label="Search sessions" placeholder="Search sessions, hosts, folders" value=${query} onInput=${e => setQuery(e.target.value)}/></label>
+    <div class="filters" aria-label="Filter sessions">${[['active','Active'],['attention','Needs you'],['working','Working'],['ended','Ended'],['all','All sessions']].map(([id,label]) => html`<button class=${filter === id ? 'active' : ''} aria-pressed=${filter === id} onClick=${() => setFilter(id)}>${label}${id === 'attention' && resource.data && needing > 0 && html`<span class="filter-count">${needing}</span>`}</button>`)}</div>
     <div class="group-control"><span>Group by</span><div class="segmented">${['host','directory'].map(g => html`<button aria-pressed=${group === g} class=${group === g ? 'active' : ''} onClick=${() => setGroup(g)}>${g === 'host' ? 'Host' : 'Directory'}</button>`)}</div></div></div>
     <div class="inbox-scroll"><${ErrorNotice} message=${resource.error} retry=${resource.reload}/>
-    ${displayHosts.filter(host => !host.available).map(host => html`<div class="host-error" role="status"><strong>${displayHostLabel(host.label)} is unavailable</strong><span>${host.error || 'Reconnect this host to refresh its sessions.'}</span></div>`)}
+    ${displayHosts.filter(host => !host.available).map(host => html`<div class="host-error" role="status" title=${host.error || ''}><strong>${displayHostLabel(host.label)} is unavailable</strong><span>${host.error || 'Reconnect this host to refresh its sessions.'}</span></div>`)}
     ${!resource.hasLoaded ? html`<${Loading}/>` : resource.data && !matching.length ? unavailable ? html`<${Empty} title="Waiting for hosts">Some hosts cannot be reached, so sessions may be missing from this view. HQ will keep checking.<button onClick=${resource.reload}>Refresh hosts</button><//>` : html`<${Empty} title=${query || filter !== 'all' ? 'No matching sessions' : 'A clear workspace'}>${query || filter !== 'all' ? 'Try another search or filter.' : 'Sessions from your connected hosts will appear here.'}<//>` : null}
-    ${ordered.map(([name, rows]) => html`<section class="session-group"><h2 title=${name}>${group === 'host' ? displayHostLabel(name) : name}<span>${rows.length}</span></h2>${rows.map(s => html`<button class=${`session-row ${s.id === selected ? 'selected' : ''}`} onClick=${() => open(s.id)} aria-current=${s.id === selected ? 'true' : undefined}><span class=${`session-mark ${attention(s) ? 'needs-you' : ''}`}><${Icon} name=${attention(s) ? 'bell' : 'terminal'} size=${19}/></span><span class="session-main"><span class="row-title">${s.title || s.session}</span><span class="row-directory" dir="auto">${group === 'host' ? s.workdir || s.session : displayHostLabel(s.host_label || s.host)}</span><span class="row-lifecycle"><${Lifecycle} session=${s}/><${ActionLabel} session=${s}/></span><span class="row-bottom"><${Status} session=${s}/><span class="row-time">${lifecycle(s) === 'ended' ? endedDate(s.ended_at) : lifecycle(s) === 'unreachable' ? `Last seen ${when(s.last_seen)}` : when(s.updated_at)}</span></span></span><${Icon} name="chevron" size=${16}/></button>`)}</section>`)}
-    </div><div class="inbox-footer">${resource.data ? `${displayHosts.filter(h => h.available).length} of ${displayHosts.length} hosts connected` : 'Connecting to your workspace'}<span>${resource.loading && resource.hasLoaded ? 'Refreshing…' : 'HQ'}</span></div>
+    ${ordered.map(([name, rows, shown]) => html`<section class="session-group"><h2 title=${name}>${group === 'host' ? displayHostLabel(name) : name}<span>${rows.length}</span></h2>${shown.map(s => html`<${SessionRow} key=${s.id} s=${s} group=${group} selected=${selected} open=${open}/>`)}</section>`)}
+    ${hidden > 0 && html`<button class="show-more" onClick=${() => setLimit(n => n + 200)}>Show ${Math.min(hidden, 200)} more of ${hidden}</button>`}
+    </div><div class="inbox-footer">${resource.data ? `${displayHosts.filter(h => h.available).length} of ${displayHosts.length} hosts connected` : 'Connecting to your workspace'}<span>${resource.loading && resource.hasLoaded ? 'Refreshing…' : ''}</span></div>
   </section>`;
 }
 // Marked parses; DOMPurify is the only path from transcript HTML into the DOM.
@@ -200,7 +224,7 @@ function MessageText({ text }) {
 function toolSummary(m) {
   let input = {};
   try { input = JSON.parse(m.input || '{}'); } catch {}
-  const value = input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || input.prompt || '';
+  const value = input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || input.prompt || input.skill || input.subagent_type || input.task_id || input.name || '';
   return String(value).split('\n')[0].slice(0, 160);
 }
 function Message({ m }) {
@@ -215,21 +239,36 @@ const MODEL_CHOICES = ['opus', 'sonnet', 'haiku', 'fable', 'gpt-5.6-sol'];
 const PERMISSION_MODES = [['auto', 'Auto'], ['default', 'Manual'], ['acceptEdits', 'Accept edits'], ['plan', 'Plan'], ['dontAsk', "Don't ask"], ['bypassPermissions', 'Bypass permissions']];
 const MODE_LABELS = Object.fromEntries(PERMISSION_MODES);
 const percent = value => typeof value === 'number' ? `${Math.round(value * 100)}%` : null;
+const OTHER_MODEL = '__other__';
 function NativeBar({ session, disabled, act }) {
-  const [model, setModel] = useState('');
   const limits = session.rate_limits || {};
+  const current = session.model || '';
+  const models = [...new Set([current, ...MODEL_CHOICES].filter(Boolean))];
   const modes = PERMISSION_MODES.some(([value]) => value === session.permission_mode) || !session.permission_mode ? PERMISSION_MODES : [...PERMISSION_MODES, [session.permission_mode, session.permission_mode]];
+  const contextShare = session.context_tokens && session.context_window ? session.context_tokens / session.context_window : null;
   const usage = [
     session.context_tokens && `${Math.round(session.context_tokens / 1000)}k${session.context_window ? ` / ${Math.round(session.context_window / 1000)}k` : ''} context`,
     typeof session.effort === 'string' && `${session.effort} effort`,
     percent(limits.five_hour?.utilization) && `5h ${percent(limits.five_hour.utilization)}`,
     percent(limits.seven_day?.utilization) && `7d ${percent(limits.seven_day.utilization)}`,
   ].filter(Boolean).join(' · ');
-  const switchModel = async e => { e.preventDefault(); const value = model.trim(); if (value && await act('set_model', { text: value })) setModel(''); };
+  // The shown model and mode are only what Claude confirmed, so a pick snaps
+  // back until the session reports the change.
+  const pickModel = e => {
+    const value = e.currentTarget.value;
+    e.currentTarget.value = current;
+    const target = value === OTHER_MODEL ? window.prompt('Switch to which model?', '')?.trim() : value;
+    if (target && target !== current) act('set_model', { text: target });
+  };
+  const pickMode = e => {
+    const value = e.currentTarget.value;
+    e.currentTarget.value = session.permission_mode || '';
+    if (value !== session.permission_mode) act('set_permission_mode', { text: value });
+  };
   return html`<div class="native-bar">
-    <form class="model-form" onSubmit=${switchModel}><span class="model-current" title="Current model">${session.model || 'Model not reported yet'}</span><label class="sr-only" for="model-input">Switch model</label><input id="model-input" list="model-choices" value=${model} placeholder="Switch to…" autocomplete="off" disabled=${disabled} onInput=${e => setModel(e.target.value)}/><datalist id="model-choices">${MODEL_CHOICES.map(choice => html`<option value=${choice}/>`)}</datalist><button type="submit" disabled=${disabled || !model.trim()}>Switch</button></form>
-    ${session.capabilities?.set_permission_mode && html`<label class="mode-select">Mode <select value=${session.permission_mode || ''} disabled=${disabled || !session.permission_mode} onChange=${e => act('set_permission_mode', { text: e.target.value })}>${!session.permission_mode && html`<option value="">Not reported yet</option>`}${modes.map(([value, label]) => html`<option value=${value}>${label}</option>`)}</select></label>`}
-    ${usage && html`<span class="usage">${usage}</span>`}
+    <select class="pill-select model-select" aria-label="Model" title="Model" value=${current} disabled=${disabled} onChange=${pickModel}>${!current && html`<option value="">Model not reported yet</option>`}${models.map(choice => html`<option value=${choice}>${choice}</option>`)}<option value=${OTHER_MODEL}>Other model…</option></select>
+    ${session.capabilities?.set_permission_mode && html`<select class="pill-select" aria-label="Permission mode" title="Permission mode" value=${session.permission_mode || ''} disabled=${disabled || !session.permission_mode} onChange=${pickMode}>${!session.permission_mode && html`<option value="">Mode not reported yet</option>`}${modes.map(([value, label]) => html`<option value=${value}>${label}</option>`)}</select>`}
+    ${usage && html`<span class=${`usage ${contextShare > .8 ? 'high' : ''}`} title="Context used / window · effort · 5-hour and 7-day usage">${usage}</span>`}
     ${session.private ? html`<span class="usage" title="Not mirrored to claude.ai">Private</span>` : session.upstream?.session_url && html`<a class="usage" href=${session.upstream.session_url} target="_blank" rel="noopener noreferrer" title="Also open on claude.ai and the Claude app">claude.ai${session.upstream.status === 'connected' ? '' : ` · ${session.upstream.status}`}</a>`}
     ${session.control_error && html`<span class="control-error" role="alert">${session.control_error}</span>`}
   </div>`;
@@ -241,7 +280,9 @@ function SlashMenu({ draft, commands, pick }) {
   return found.length ? html`<div class="slash-menu" role="listbox" aria-label="Slash commands">${found.map(c => html`<button type="button" role="option" onClick=${() => pick(`/${c} `)}>/${c}</button>`)}</div>` : null;
 }
 function TranscriptEmpty({ session, openTerminal }) {
-  if (session.transport === 'native') return html`<${Empty} title="No conversation messages yet" icon="terminal">Messages will appear when this session sends them.<//>`;
+  if (session.transport === 'native') return canControl(session)
+    ? html`<${Empty} title="No messages yet" icon="terminal">New messages from this session will appear here as it runs.<//>`
+    : html`<${Empty} title="No messages recorded" icon="terminal">HQ has no saved messages for this session.<//>`;
   const reason = {
     identity_missing: 'HQ couldn’t identify the exact Claude conversation for this session.',
     file_missing: 'Claude hasn’t saved a conversation file for this session.',
@@ -350,22 +391,47 @@ function NativeControl({ id, control, disabled, act }) {
     }) : html`<h3>Allow ${control.tool_name}?</h3><pre class="terminal-output">${JSON.stringify(control.input || {}, null, 2)}</pre>`}
     ${!saved && html`<p role="status">Answers could not be saved on this device.</p>`}<div class="actions"><button disabled=${disabled} onClick=${() => respond('deny')}>Deny</button>${!questions.length && suggestion && html`<button disabled=${disabled} title=${`Always allow ${suggestion}`} onClick=${() => respond('allow', true)}>Always allow</button>`}<button class="primary" disabled=${disabled || (questions.length > 0 && !ready)} onClick=${() => respond('allow')}>${questions.length ? 'Submit answers' : suggestion ? 'Allow once' : 'Allow'}</button></div>${!questions.length && suggestion && html`<p class="read-only-note">Always allow ${suggestion}.</p>`}</section>`;
 }
+const MESSAGE_PAGE = 120;
+// Ask only for messages after the last one that can no longer change: a tool
+// call changes once its result arrives, so the cursor stays before the first open one.
+function detailCursor({ messages, digest }) {
+  const m = messages || [];
+  const open = m.findIndex(x => x.role === 'tool' && !x.done);
+  const base = m[(open < 0 ? m.length : open) - 1];
+  return { ...(base?.id ? { after: base.id } : {}), ...(digest ? { commands: digest } : {}) };
+}
+function mergeMessages(known, data) {
+  const incoming = data.messages;
+  if (!Array.isArray(incoming)) return known;
+  if (!data.messages_after) return incoming.length || !known?.length ? incoming : known; // an ended summary keeps the viewed history
+  const at = known ? known.findLastIndex(m => m.id === data.messages_after) : -1;
+  if (at < 0) return null; // cannot place the delta; the next poll fetches everything
+  return !incoming.length && at === known.length - 1 ? known : [...known.slice(0, at + 1), ...incoming];
+}
+const sendOnEnter = () =>window.matchMedia?.('(pointer: fine)').matches;
 function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   const [fast, setFast] = useState(false);
   const [kick, setKick] = useState(0); // poll fast briefly after a control so its confirmation shows promptly
-  const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, fast || kick ? 1000 : 5000);
   // Retain only this mounted session's already-viewed history, never persist it.
-  const history = useRef({messages:null,tail:''});
-  if (resource.data?.messages?.length) history.current.messages = resource.data.messages;
+  const history = useRef({messages:null,tail:'',commands:null,digest:null,seen:null});
+  const resource = useResource(`/api/sessions/${encodeURIComponent(id)}`, fast || kick ? 1000 : 5000, () => detailCursor(history.current));
+  if (resource.data && history.current.seen !== resource.data) {
+    history.current.seen = resource.data;
+    history.current.messages = mergeMessages(history.current.messages, resource.data);
+    if (resource.data.slash_commands) history.current.commands = resource.data.slash_commands;
+    history.current.digest = history.current.commands ? resource.data.slash_commands_digest : null;
+  }
   if (resource.data?.tail) history.current.tail = resource.data.tail;
   // Unreachable hosts may return an HTTP error for detail. The index still
   // carries authoritative lifecycle; never keep showing cached Alive controls.
   const observed = snapshot && ['ended','unreachable'].includes(lifecycle(snapshot)) ? {...resource.data,...snapshot} : resource.data || snapshot;
-  const s = observed ? {...observed, messages:observed.messages?.length ? observed.messages : history.current.messages, tail:observed.tail || history.current.tail} : null;
+  const s = observed ? {...observed, messages:history.current.messages || observed.messages, slash_commands:history.current.commands, tail:observed.tail || history.current.tail} : null;
   const native = s?.transport === 'native';
+  const live = !!s && canControl(s);
   const pending = native ? !!s?.native_control : !!s?.menu;
-  const streaming = native && canControl(s) ? s?.streaming : null;
-  useEffect(() => setFast(native && canControl(s) && (s?.status === 'working' || !!streaming)), [native, s?.status, s?.lifecycle, !!streaming]);
+  const streaming = native && live ? s?.streaming : null;
+  const busyWorking = live && !pending && !streaming && working(s);
+  useEffect(() => setFast(native && live && (s?.status === 'working' || !!streaming)), [native, s?.status, s?.lifecycle, !!streaming]);
   const [tab, setTab] = useState('conversation');
   const [draft, setDraft] = useState(() => readDraft(id));
   const [draftOpen, setDraftOpen] = useState(false);
@@ -373,13 +439,20 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState('');
   const [notice, setNotice] = useState('');
+  const [shownCount, setShownCount] = useState(MESSAGE_PAGE);
   const lock = useRef(false);
   const transcript = useRef(null);
+  const reply = useRef(null);
   const pinned = useRef(true);
   const shownQuestion = useRef(null);
-  useEffect(() => {
+  const keepFromBottom = useRef(null);
+  const messages = s?.messages || [];
+  const offset = Math.max(0, messages.length - shownCount);
+  useLayoutEffect(() => {
     const container = transcript.current;
-    if (!container) return;
+    // Before the first detail response the card can render above messages that
+    // have not arrived yet; scrolling to it then would leave it off screen.
+    if (!container || !resource.hasLoaded) return;
     const question = native ? s?.native_control?.request_id : s?.menu ? s.menu.signature || JSON.stringify([s.menu.question, s.menu.kind]) : null;
     if (question) {
       if (shownQuestion.current !== question) {
@@ -392,21 +465,32 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
     }
     shownQuestion.current = null;
     if (pinned.current) container.scrollTop = container.scrollHeight;
-  }, [s?.messages, s?.menu, s?.native_control, tab, streaming]);
+  }, [resource.hasLoaded, s?.messages, s?.menu, s?.native_control, tab, streaming, busyWorking]);
+  useLayoutEffect(() => {
+    const container = transcript.current;
+    if (container && keepFromBottom.current != null) container.scrollTop = container.scrollHeight - keepFromBottom.current;
+    keepFromBottom.current = null;
+  }, [shownCount]);
+  useLayoutEffect(() => {
+    const el = reply.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight + 2, 220)}px`;
+  }, [draft, draftOpen, pending]);
   const act = async (action, extra = {}) => {
     if (lock.current || !resource.data || !canControl(s) || s?.revision == null || resource.error || !navigator.onLine) return false;
     lock.current = true; setBusy(true); setActionError(''); setNotice('');
     try {
       const { fromDraft, ...body } = extra;
       await api(`/api/sessions/${encodeURIComponent(id)}/action`, { action, ...body, revision: s.revision, request_id: requestId() });
-      if (action === 'send' || extra.fromDraft) { setDraft(''); saveDraft(id, ''); }
+      if (action === 'send' || extra.fromDraft) { setDraft(''); saveDraft(id, ''); pinned.current = true; }
       setKick(k => k + 1); setTimeout(() => setKick(k => k - 1), 8000);
       setNotice(action === 'send' ? 'Message sent.' : 'Control sent. Screen refreshed.');
       return true;
     } catch (e) { setActionError(`${e.message} Nothing will be retried automatically. Check the refreshed session before trying again.`); return false; }
     finally { await resource.reload(); refreshList(); lock.current = false; setBusy(false); }
   };
-  const disabled = busy || !resource.data || !canControl(s) || !s || s.revision == null || !!resource.error || !navigator.onLine;
+  const disabled = busy || !resource.data || !live || s.revision == null || !!resource.error || !navigator.onLine;
   const key = value => act('key', { key: value });
   const submit = () => {
     if (!draft.trim() || pending) return;
@@ -414,21 +498,26 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
     if (model) act('set_model', { text: model[1], fromDraft: true });
     else act('send', { text: draft });
   };
-  return html`<section class="detail" aria-label="Session detail"><header class="detail-header"><button class="icon-button back" aria-label="Back to sessions" onClick=${back}><${Icon} name="back"/></button><div class="detail-title"><h2>${s?.title || s?.session || 'Session'}</h2><span>${s ? displayHostLabel(s.host_label || s.host) : 'Connecting…'}</span></div>${s && html`<${Status} session=${s}/>`}<button class="icon-button" disabled=${resource.loading} aria-label="Refresh session" onClick=${resource.reload}><${Icon} name="refresh"/></button></header>
-    ${s && html`<div class="detail-context"><span title=${s.workdir} dir="auto">${s.workdir || s.session}</span>${toggleMute && html`<button class="quiet-button" onClick=${() => toggleMute(id)}>${muted ? 'Unmute' : 'Mute'}</button>`}</div>`}
-    ${s && html`<div class="detail-lifecycle"><${Lifecycle} session=${s}/><${ActionLabel} session=${s}/><span>${lifecycle(s) === 'ended' ? endedDate(s.ended_at) : lifecycle(s) === 'unreachable' ? `Last seen ${when(s.last_seen)}` : ''}</span></div>`}
-    ${s && !canControl(s) && html`<div class="lifecycle-notice" role="status">${lifecycle(s) === 'ended' ? 'This session has ended. Its available history is read-only.' : lifecycle(s) === 'unreachable' ? 'This session is unreachable. Its last known activity does not mean it has ended.' : 'Session availability has not been confirmed. Controls are unavailable.'}</div>`}
-    ${native && s && canControl(s) && s.capabilities?.set_model && html`<${NativeBar} session=${s} disabled=${disabled} act=${act}/>`}
-    <div class="detail-tabs" role="tablist" aria-label="Session view">${(native ? ['conversation'] : ['conversation','terminal']).map(t => html`<button role="tab" id=${`tab-${t}`} aria-selected=${native || tab === t} aria-controls="session-panel" class=${native || tab === t ? 'active' : ''} onClick=${() => setTab(t)}>${t === 'conversation' ? 'Conversation' : 'Terminal'}</button>`)}</div>
+  const showEarlier = () => { const el = transcript.current; keepFromBottom.current = el ? el.scrollHeight - el.scrollTop : null; setShownCount(n => n + MESSAGE_PAGE * 2); };
+  const state = s ? lifecycle(s) : null;
+  const tabs = native ? [] : ['conversation', 'terminal'];
+  const status = busy ? 'Sending…' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : sendOnEnter() ? 'Enter to send · Shift+Enter for a new line' : 'Sends directly to the live session');
+  return html`<section class="detail" aria-label="Session detail"><header class="detail-header"><button class="icon-button back" aria-label="Back to sessions" onClick=${back}><${Icon} name="back"/></button><div class="detail-title"><h2 dir="auto" title=${s?.title || s?.session || ''}>${s?.title || s?.session || 'Session'}</h2>${s ? html`<div class="detail-lifecycle"><${Lifecycle} session=${s}/><${ActionLabel} session=${s}/><span class="detail-where" dir="auto" title=${s.workdir || ''}>${[s.workdir || s.session, displayHostLabel(s.host_label || s.host)].filter(Boolean).join(' · ')}</span>${state === 'ended' || state === 'unreachable' ? html`<span>${state === 'ended' ? endedDate(s.ended_at) : `Last seen ${when(s.last_seen)}`}</span>` : null}</div>` : html`<div class="detail-lifecycle"><span>Connecting…</span></div>`}</div>${live && html`<${Status} session=${s}/>`}${toggleMute && live && html`<button class="quiet-button" onClick=${() => toggleMute(id)} title="Notifications for this session">${muted ? 'Unmute' : 'Mute'}</button>`}<button class="icon-button" disabled=${resource.loading} aria-label="Refresh session" onClick=${resource.reload}><${Icon} name="refresh"/></button></header>
+    ${s && !live && html`<div class="lifecycle-notice" role="status">${state === 'ended' ? 'This session has ended. Its available history is read-only.' : state === 'unreachable' ? 'This session is unreachable. Its last known activity does not mean it has ended.' : 'Session availability has not been confirmed. Controls are unavailable.'}</div>`}
+    ${native && live && s.capabilities?.set_model && html`<${NativeBar} session=${s} disabled=${disabled} act=${act}/>`}
+    ${tabs.length > 0 && html`<div class="detail-tabs" role="tablist" aria-label="Session view">${tabs.map(t => html`<button role="tab" id=${`tab-${t}`} aria-selected=${tab === t} aria-controls="session-panel" class=${tab === t ? 'active' : ''} onClick=${() => setTab(t)}>${t === 'conversation' ? 'Conversation' : 'Terminal'}</button>`)}</div>`}
     <${ErrorNotice} message=${resource.error} retry=${resource.reload}/><${ErrorNotice} message=${actionError}/>
-    <div class="transcript" id="session-panel" role="tabpanel" aria-labelledby=${`tab-${tab}`} ref=${transcript} onScroll=${e => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
-      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<${Message} key=${m.id || i} m=${m}/>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
+    <div class="transcript" id="session-panel" role=${tabs.length ? 'tabpanel' : undefined} aria-labelledby=${tabs.length ? `tab-${tab}` : undefined} aria-label=${tabs.length ? undefined : 'Conversation'} ref=${transcript} onScroll=${e => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
+      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (live ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${offset > 0 && html`<button class="show-earlier" onClick=${showEarlier}>Show ${Math.min(offset, MESSAGE_PAGE * 2)} earlier messages</button>`}${messages.length ? messages.slice(offset).map((m, i) => html`<${Message} key=${m.id || offset + i} m=${m}/>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
       ${streaming && html`<article class="message assistant streaming" aria-live="polite"><div class="message-author">Claude</div><${MessageText} text=${streaming}/></article>`}
-      ${native && s?.native_control && canControl(s) && html`<${NativeControl} key=${s.native_control.request_id} id=${id} control=${s.native_control} disabled=${disabled} act=${act}/>`}
-      ${!native && s?.menu && canControl(s) && html`<${Question} key=${s.menu.question + s.menu.kind} id=${id} menu=${s.menu} tail=${s.tail} disabled=${disabled} act=${act}/>`}
+      ${resource.hasLoaded && busyWorking && tab === 'conversation' && html`<div class="working-indicator" role="status"><span class="spinner"/>Claude is working…</div>`}
+      ${native && s?.native_control && live && html`<${NativeControl} key=${s.native_control.request_id} id=${id} control=${s.native_control} disabled=${disabled} act=${act}/>`}
+      ${!native && s?.menu && live && html`<${Question} key=${s.menu.question + s.menu.kind} id=${id} menu=${s.menu} tail=${s.tail} disabled=${disabled} act=${act}/>`}
     </div>
-    <div class="detail-bottom">${s && !canControl(s) ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`<div>${native ? html`<div class="native-actions"><${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => act('interrupt')}/></div>` : html`<details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>`}
-    ${pending && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${pending && !draftOpen}>${native && html`<${SlashMenu} draft=${draft} commands=${s?.slash_commands} pick=${value => { setDraft(value); setSaved(saveDraft(id, value)); document.getElementById('reply')?.focus(); }}/>`}<form class="composer" onSubmit=${e => { e.preventDefault(); submit(); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : 'Message this session…'} onKeyDown=${e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : pending ? 'Use the request controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
+    <div class="detail-bottom">${s && !live ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`
+      ${!native && html`<details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>`}
+      <div id="session-composer" hidden=${pending && !draftOpen}>${native && html`<${SlashMenu} draft=${draft} commands=${s?.slash_commands} pick=${value => { setDraft(value); setSaved(saveDraft(id, value)); reply.current?.focus(); }}/>`}<form class="composer" onSubmit=${e => { e.preventDefault(); submit(); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" ref=${reply} rows="1" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : native ? 'Reply to Claude…' : 'Message this session…'} onKeyDown=${e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && (e.metaKey || e.ctrlKey || sendOnEnter())) { e.preventDefault(); submit(); } }} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending}><${Icon} name="arrow"/></button></form></div>
+      <div class="composer-meta">${pending ? html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>` : html`<span role="status">${status}</span>`}${native && html`<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => act('interrupt')}/>`}</div>`}</div>
   </section>`;
 }
 function ArmedButton({ label, onFire, disabled = false }) {
@@ -497,7 +586,8 @@ function Workspace({ auth, logout }) {
   const [view, setView] = useState(location.hash.startsWith('#w-') ? 'workers' : 'inbox');
   const [selected, setSelected] = useState(sessionHash);
   const [online, setOnline] = useState(navigator.onLine);
-  const sessions = useResource('/api/sessions', 8000);
+  const [filter, setFilter] = usePreference('filter', 'active');
+  const sessions = useResource(listPath(filter), 8000);
   const preferences = useResource('/api/push/preferences');
   const [error, setError] = useState('');
   const muteLock = useRef(false);
@@ -521,7 +611,7 @@ function Workspace({ auth, logout }) {
     catch(e) { setError(e.message); } finally { muteLock.current = false; }
   } : null;
   return html`<div class=${`app ${selected && view === 'inbox' ? 'detail-open' : ''}`}><aside class="navigation"><a href="#" class="brand" aria-label="HQ home" onClick=${() => { setView('inbox'); open(null); }}><span class="brand-mark">hq<span/></span><span class="brand-caption">Your command center</span></a><nav aria-label="Main navigation">${[['inbox','Sessions'],['workers','Workers'],['routines','Routines'],['settings','Settings']].map(([id,label]) => html`<button class=${view === id ? 'active' : ''} aria-current=${view === id ? 'page' : undefined} onClick=${() => setView(id)}><${Icon} name=${id}/><span>${label}</span>${id === 'inbox' && sessions.data?.sessions.some(attention) && html`<i class="nav-dot"/>`}</button>`)}</nav><div class="nav-foot"><span class=${`connection-dot ${online ? '' : 'offline'}`}/>${online ? 'Workspace connected' : 'Device offline'}</div></aside>
-    <main class="workspace">${!online && html`<div class="offline-banner" role="status">You’re offline. Reconnect to refresh sessions or send a message.</div>`}<${ErrorNotice} message=${error}/>${view === 'inbox' ? html`<div class="session-layout"><${Inbox} resource=${sessions} selected=${selected} open=${open}/>${selected ? html`<${Detail} key=${selected} id=${selected} snapshot=${sessions.data?.sessions.find(s => s.id === selected)} back=${() => open(null)} refreshList=${sessions.reload} muted=${preferences.data?.muted.includes(selected)} toggleMute=${toggleMute}/>` : html`<div class="detail welcome"><div class="welcome-art" aria-hidden="true"><${Icon} name="terminal" size=${38}/></div><h2>A place for every session.</h2><p>Pick up a conversation, answer a question,<br/>or see how the work is coming along.</p><span>Select a session to get started</span></div>`}</div>` : view === 'settings' ? html`<${Settings} auth=${auth} logout=${logout}/>` : html`<${Operations} key=${view} view=${view}/>`}</main></div>`;
+    <main class="workspace">${!online && html`<div class="offline-banner" role="status">You’re offline. Reconnect to refresh sessions or send a message.</div>`}<${ErrorNotice} message=${error}/>${view === 'inbox' ? html`<div class="session-layout"><${Inbox} resource=${sessions} selected=${selected} open=${open} filter=${filter} setFilter=${setFilter}/>${selected ? html`<${Detail} key=${selected} id=${selected} snapshot=${sessions.data?.sessions.find(s => s.id === selected)} back=${() => open(null)} refreshList=${sessions.reload} muted=${preferences.data?.muted.includes(selected)} toggleMute=${toggleMute}/>` : html`<div class="detail welcome"><div class="welcome-art" aria-hidden="true"><${Icon} name="terminal" size=${38}/></div><h2>A place for every session.</h2><p>Pick up a conversation, answer a question,<br/>or see how the work is coming along.</p><span>Select a session to get started</span></div>`}</div>` : view === 'settings' ? html`<${Settings} auth=${auth} logout=${logout}/>` : html`<${Operations} key=${view} view=${view}/>`}</main></div>`;
 }
 function App() {
   const auth = useResource('/api/auth');

@@ -8,7 +8,10 @@ The whole HTTP contract:
                                      {"action": "send", "session", "text",
                                       "session_id", "revision", "request_id"}
                                      {"action": "kill",  "session"}
-  POST /api/routines/action          {"action": "run"|"toggle", "name", "enabled"?}
+  GET  /api/sessions?ended=0         -> fleet snapshot without ended rows, plus "ended_count"
+  GET  /api/sessions/{id}?after=<message id>&commands=<digest>
+                                     -> detail with only newer messages ("messages_after")
+  POST /api/routines/action         {"action": "run"|"toggle", "name", "enabled"?}
   POST /api/oneshot                  {"prompt", "timeout"?} -> {"ok", "output"}
 GET / serves the fleet dashboard; session links use #session=<opaque-id>.
 
@@ -36,6 +39,8 @@ Env: BCE_WORKSPACE_DIR (registry base, default ~/.basecamp-enhancer),
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import secrets
 import socket
@@ -46,7 +51,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -57,6 +62,33 @@ from .security import COOKIE, MAX_AGE, Security
 
 STATIC = Path(__file__).resolve().parent / "static"
 ROUTINE_REAP_HOURS = float(os.environ.get("CC_TMUX_ROUTINE_REAP_HOURS", "12"))
+
+
+def without_ended(snapshot: dict, ended: bool) -> dict:
+    """`?ended=0` drops ended rows and counts them; peers and old clients get every row."""
+    if ended:
+        return snapshot
+    kept = [s for s in snapshot["sessions"] if s.get("lifecycle") != "ended"]
+    return dict(snapshot, sessions=kept, ended_count=len(snapshot["sessions"]) - len(kept))
+
+
+def incremental_detail(result: dict, after: str | None, commands: str | None) -> dict:
+    """Return only messages after the message whose id is `after`, marked by
+    `messages_after`; an unknown id returns the full list without that marker.
+    `slash_commands` is omitted while the client's `commands` digest is current."""
+    messages = result.get("messages")
+    if after and isinstance(messages, list):
+        index = next((i for i in range(len(messages) - 1, -1, -1)
+                      if isinstance(messages[i], dict) and messages[i].get("id") == after), None)
+        if index is not None:
+            result = dict(result, messages=messages[index + 1:], messages_after=after)
+    listed = result.get("slash_commands")
+    if isinstance(listed, list):
+        digest = hashlib.sha256(json.dumps(listed).encode()).hexdigest()[:16]
+        result = dict(result, slash_commands_digest=digest)
+        if commands == digest:
+            result.pop("slash_commands")
+    return result
 
 
 def cascade_path(request: Request) -> tuple[str, ...]:
@@ -231,12 +263,17 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/sessions")
-    def sessions_list(request: Request):
-        return fleet.snapshot(path=cascade_path(request))
+    def sessions_list(request: Request, ended: bool = True):
+        return without_ended(fleet.snapshot(path=cascade_path(request)), ended)
 
     @app.get("/api/sessions/{session_id}")
-    def session_detail(session_id: str, request: Request):
-        return fleet.detail(session_id, path=cascade_path(request))
+    def session_detail(
+        session_id: str,
+        request: Request,
+        after: str | None = Query(default=None, max_length=256),
+        commands: str | None = Query(default=None, max_length=64),
+    ):
+        return incremental_detail(fleet.detail(session_id, path=cascade_path(request)), after, commands)
 
     @app.post("/api/sessions/{session_id}/action")
     def session_action(session_id: str, req: SessionAction, request: Request):

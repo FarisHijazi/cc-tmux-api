@@ -384,7 +384,9 @@ bodies (`{}`) for logout and test push. The contracts live in
 | `POST /api/auth/login` | `{token}` → `{ok}` and signed pairing cookie; public, rate limited |
 | `POST /api/auth/logout` | `{}` → `{ok}`; clears this browser's cookie |
 | `GET /api/sessions` | `{node_id, hosts, sessions, updated_at}`; hosts report `available`, lifecycle and optional `error` |
+| `GET /api/sessions?ended=0` | Same, without ended rows, plus `ended_count`. Peers and older clients omit the parameter and get every row |
 | `GET /api/sessions/{id}` | Session detail, including `tail`, `messages`, recognized `menu` or null, and `transcript_status` on live probe detail |
+| `GET /api/sessions/{id}?after=<message id>&commands=<digest>` | Same detail, but only the messages after that id, marked `messages_after`; an unknown id (pruned, or a message without `id`) returns the full list without the marker. `slash_commands` is left out while `commands` equals the returned `slash_commands_digest` |
 | `POST /api/sessions/{id}/action` | `{action, revision, request_id, text?, key?, index?, response?}` → `{ok, id, request_id, revision, refresh_required?}` |
 | `GET /api/push` | `{available, public_key, reason?}` |
 | `POST /api/push/subscribe` | `{subscription}` → `{ok}`; browser PushSubscription JSON |
@@ -507,7 +509,15 @@ with Chrome installed:
 
 ```bash
 MOBILE_BROWSER_ENV=/path/to/playwright-environment node tests/frontend_test.mjs
+MOBILE_BROWSER_ENV=/path/to/playwright-environment node tests/frontend_layout_test.mjs
 ```
+
+`frontend_test.mjs` writes its screenshots to `HQ_SHOT_DIR` (default: the OS temp
+directory). `frontend_layout_test.mjs` covers inbox ordering/paging, the remembered
+filter, approval visibility, message paging, the model/mode pickers, Enter to send,
+and incremental polling (`ended=0` list, `after`/`commands` detail deltas) against a
+mock that mirrors `server.py`. `frontend_test.mjs` mocks an older server that
+ignores those parameters, so it also covers a new client on an old server.
 
 See [the browser evidence index](tests/browser/README.md) for the separately gated
 real-preview harness and its evidence. Automated tests and desktop emulation do

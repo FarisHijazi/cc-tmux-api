@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
+import { tmpdir } from 'node:os';
+const shots = process.env.HQ_SHOT_DIR || tmpdir();
 const require = createRequire(join(process.env.MOBILE_BROWSER_ENV || '/private/tmp/cc-mobile-browser', 'package.json'));
 const { chromium } = require('playwright');
 const root = resolve('src/cc_tmux_api/static');
@@ -154,7 +156,7 @@ try {
     await page.getByLabel('Search sessions').fill('');
     await page.getByRole('button', {name:'Directory',exact:true}).click();
     await page.getByRole('heading', {name:'/workspace/project 1',exact:true}).waitFor();
-    await page.screenshot({path:`/private/tmp/hq-inbox-${width}.png`,fullPage:true});
+    await page.screenshot({path:`${shots}/hq-inbox-${width}.png`,fullPage:true});
     await page.getByRole('button', { name:/Review the implementation/ }).click();
     await page.getByRole('heading', {name:'Which option should we use?'}).waitFor();
     assert.equal(await page.locator('.detail-lifecycle .alive').count(),1,'Verified legacy API records without lifecycle fields must remain controllable');
@@ -274,7 +276,7 @@ try {
     assert.equal(await page.getByRole('button',{name:'Confirm typed answer',exact:true}).isDisabled(),true,'Uninserted text must not be silently excluded from confirmation');
     assert.equal(new Set(actions.map(a => a.request_id)).size,actions.length);
     assert.ok(actions.every(a => /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(a.request_id)),'Both UUID implementations must generate valid v4 IDs');
-    await page.screenshot({path:`/private/tmp/hq-frontend-${width}.png`,fullPage:true});
+    await page.screenshot({path:`${shots}/hq-frontend-${width}.png`,fullPage:true});
     menu.question = 'A different question';
     await page.getByRole('button',{name:'Refresh session',exact:true}).click();
     await page.getByRole('heading',{name:'A different question'}).waitFor();
@@ -315,7 +317,7 @@ try {
     await page.reload();
     await page.locator('.message-text').getByRole('heading',{name:'Findings',exact:true}).waitFor();
     await page.locator('.transcript').evaluate(el => { el.scrollTop = 0; });
-    await page.screenshot({path:`/private/tmp/hq-markdown-${width}.png`,fullPage:true});
+    await page.screenshot({path:`${shots}/hq-markdown-${width}.png`,fullPage:true});
     const actionsBeforeOffline = actions.length;
     session.lifecycle = 'unreachable'; session.alive = null;
     failDetail = true;
@@ -359,7 +361,7 @@ try {
     await page.getByRole('tab',{name:'Terminal',exact:true}).click();
     await page.getByText('No last known terminal output is available.',{exact:true}).waitFor();
     assert.equal(actions.length,actionsBeforeOffline,'Read-only lifecycle views must not send actions');
-    await page.screenshot({path:`/private/tmp/hq-ended-${width}.png`,fullPage:true});
+    await page.screenshot({path:`${shots}/hq-ended-${width}.png`,fullPage:true});
     for (const [status, explanation] of [
       ['identity_missing','HQ couldn’t identify the exact Claude conversation for this session.'],
       ['file_missing','Claude hasn’t saved a conversation file for this session.'],

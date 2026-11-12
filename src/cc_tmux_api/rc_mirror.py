@@ -9,6 +9,7 @@ happens on this module's threads, which take that lock briefly through the
 `upstream_*` host methods and never across a request.
 """
 
+import itertools
 import json
 import os
 import queue
@@ -82,7 +83,9 @@ class Mirror:
         self._host = host
         self._launch = {"Authorization": f"Bearer proxy-account-{account}"}
         network = {"transport": transport} if transport else {"proxy": proxy, "verify": ca or True}
-        self._http = httpx.Client(
+        # One client, so one connection pool, per link: a shared pool filled with connections that
+        # ended links never released, and every other session's mirror then waited forever.
+        self._client = lambda: httpx.Client(
             base_url=base_url,
             # The account proxy passes requests carrying x-hq-mirror to Anthropic
             # instead of routing /v1/code/sessions back to this hub.
@@ -118,13 +121,13 @@ class Mirror:
             links, self._links = list(self._links.values()), {}
         for link in links:
             link.stop.set()
-        self._http.close()
+            link.http.close()
 
 
 class _Link:
     def __init__(self, mirror, sid):
         self.mirror, self.sid = mirror, sid
-        self.host, self.http = mirror._host, mirror._http
+        self.host, self.http = mirror._host, mirror._client()
         self.stop = threading.Event()
         self.ready = threading.Event()
         self.outbox = queue.Queue(MAX_OUTBOX)
@@ -326,6 +329,8 @@ class _Link:
             self.stop.set()
             self.ready.set()
             self.mirror._drop(self)
+            # Also aborts the listener's open stream, which otherwise waits for the next event.
+            self.http.close()
 
     def _listen(self):
         delay = busy_delay = self.mirror.backoff
@@ -351,7 +356,8 @@ class _Link:
                         self.streaming = True
                         self._set("connected")
                         delay = self.mirror.backoff
-                        for event, data in _sse(reply.iter_lines()):
+                        lines = itertools.takewhile(lambda _: not self.stop.is_set(), reply.iter_lines())
+                        for event, data in _sse(lines):
                             if self.stop.is_set():
                                 return
                             # Ephemeral deltas and session/delivery updates are for

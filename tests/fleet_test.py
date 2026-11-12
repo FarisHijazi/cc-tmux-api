@@ -330,6 +330,17 @@ def test_transcript_exact_uuid_and_text_only(tmp_path, monkeypatch):
     assert probe.transcript_messages({}, '/workspace') == []
 
 
+def test_transcript_messages_carry_record_uuid(tmp_path, monkeypatch):
+    path = tmp_path / f'{SID}.jsonl'
+    monkeypatch.setattr(probe, 'transcript_path', lambda *_: path)
+    entries = [{'type': 'user', 'uuid': 'u-1', 'message': {'content': 'hello'}},
+               {'type': 'assistant', 'uuid': 'a-1', 'message': {'content': 'answer'}}]
+    path.write_text('\n'.join(json.dumps(e) for e in entries))
+    assert probe.transcript_messages({'sid': SID}, '/workspace') == [
+        {'role': 'user', 'text': 'hello', 'id': 'u-1'},
+        {'role': 'assistant', 'text': 'answer', 'id': 'a-1'}]
+
+
 def test_transcript_tail_bounded(tmp_path):
     path = tmp_path / 'large.jsonl'
     path.write_bytes(b'x' * (probe.LIMIT + 100) + b'\n{"type":"user"}\n')

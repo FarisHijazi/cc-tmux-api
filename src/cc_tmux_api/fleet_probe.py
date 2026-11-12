@@ -367,7 +367,9 @@ def transcript_messages(meta, workdir):
             content = '\n'.join(b['text'] for b in content if isinstance(b, dict)
                                 and b.get('type') == 'text' and isinstance(b.get('text'), str))
         if isinstance(content, str) and content.strip():
-            messages.append({'role': role, 'text': content})
+            # The record uuid lets the UI fetch only messages after the last one it has.
+            messages.append({'role': role, 'text': content,
+                             **({'id': entry['uuid']} if isinstance(entry.get('uuid'), str) else {})})
     return messages[-100:]
 
 
