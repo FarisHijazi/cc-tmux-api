@@ -453,11 +453,18 @@ def parse_menu(text):
     return result
 
 
+def _readable_file(path):
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def notify_library():
     helper = shutil.which('cc-prompt-state')
     if helper:
         candidate = Path(helper).resolve().parent.parent / 'hooks' / 'cc-lib.sh'
-        if candidate.is_file():
+        if _readable_file(candidate):
             return candidate
     # Installed plugin registries are local configuration, never request input.
     registry = Path.home() / '.claude' / 'plugins' / 'installed_plugins.json'
@@ -467,12 +474,12 @@ def notify_library():
             if name.split('@')[0] == 'cc-notify':
                 for install in installs:
                     candidate = Path(install['installPath']) / 'hooks' / 'cc-lib.sh'
-                    if candidate.is_file():
+                    if _readable_file(candidate):
                         return candidate
     except (ValueError, TypeError, KeyError):
         pass
     candidate = Path.home() / '.claude' / 'hooks' / 'cc-lib.sh'
-    return candidate if candidate.is_file() else None
+    return candidate if _readable_file(candidate) else None
 
 
 def presentation(meta, menu, token=None, status='unknown', attention_kind=None):

@@ -1,6 +1,6 @@
 [project]
 name = "cc-tmux-api"
-version = "0.7.0"
+version = "0.8.0"
 description = "Local daemon that spawns, lists, kills, and schedules unattended Claude Code workers in tmux (with reboot revival)"
 readme = "README.md"
 authors = [
@@ -15,8 +15,13 @@ dependencies = [
     "uvicorn>=0.29",
 ]
 
+[project.optional-dependencies]
+mcp = ["mcp>=2.3", "pyjwt[crypto]>=2.8"]
+
 [project.scripts]
 cc-tmux-api = "cc_tmux_api.cli:main"
+cc-tmux-mcp = "cc_tmux_api.mcp_server:main"
+cc-rc-watchdog = "cc_tmux_api.rc_watchdog:main"
 
 [build-system]
 requires = ["uv_build>=0.9.2,<0.10.0"]
@@ -25,6 +30,7 @@ build-backend = "uv_build"
 [dependency-groups]
 dev = [
     "httpx",
+    "mcp>=2.3",
     "pytest",
     "ruff",
 ]
