@@ -242,7 +242,9 @@ def _env_args(env: dict | None) -> list[str]:
 
 
 def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task",
-          env: dict[str, str] | None = None) -> dict:
+          env: dict[str, str] | None = None, resume_max_days: float | None = None) -> dict:
+    """resume_max_days overrides RESUME_MAX_DAYS for this worker's revive after a
+    reboot; 0 = always revive (an always-on loop watcher)."""
     env_args = _env_args(env)  # validate before anything is created
     workdir = workdir or DEFAULT_WORKDIR
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:24] or "task"
@@ -267,6 +269,7 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
         (reg / "meta.json").write_text(json.dumps({
             "session": session, "sid": sid, "title": title, "workdir": workdir,
             "kind": kind, "created": int(time.time()), "env": env or {},
+            "resume_max_days": resume_max_days,
             # loop watchers get nudged ("continue") when revived after a reboot;
             # the /loop directive in the prompt is the source of truth
             "loop": bool(re.search(r"/loop\s", prompt)),
@@ -440,7 +443,6 @@ def resume_registered() -> list[str]:
     if not SESSIONS_DIR.is_dir():
         return []
     live = {s["name"] for s in _sessions()}
-    cutoff = time.time() - RESUME_MAX_DAYS * 86400
     revived, loops = [], []
     for meta_f in sorted(SESSIONS_DIR.glob("*/meta.json")):
         reg = meta_f.parent
@@ -454,7 +456,9 @@ def resume_registered() -> list[str]:
         wd = meta.get("workdir") or DEFAULT_WORKDIR
         if not session or not sid or session in live:
             continue
-        if meta.get("created", 0) < cutoff:
+        max_days = meta.get("resume_max_days")
+        max_days = RESUME_MAX_DAYS if max_days is None else max_days
+        if max_days > 0 and meta.get("created", 0) < time.time() - max_days * 86400:
             continue  # too old to auto-revive; still listed in the registry
         if not _jsonl_path(sid, wd).exists():
             continue  # nothing to resume from

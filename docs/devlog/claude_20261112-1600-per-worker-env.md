@@ -13,3 +13,9 @@ with the server's env only.
 
 **Tests**: `tests/worker_env_test.py` (spawn passes and saves it, no flag without env, a bad name creates nothing,
 revive reapplies it). The full suite passed: 314.
+
+**Revive age limit per worker** (Faris: "an overridable parameter when creating the session"):
+- `spawn(resume_max_days=...)` and the API spawn `"resume_max_days"` are saved in `meta.json`.
+- Revive uses that value instead of `RESUME_MAX_DAYS` (5). `0` means always revive, for an always-on `/loop` watcher.
+  If it is absent, the default applies.
+- Tests: the default skips a 30-day-old worker; `0` and `60` revive it. The full suite passed: 317.

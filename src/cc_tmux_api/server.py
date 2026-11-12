@@ -135,6 +135,7 @@ class WorkerAction(BaseModel):
     prompt: str | None = None
     workdir: str | None = None
     env: dict[str, str] | None = None  # spawn: the worker's own env, kept for revive
+    resume_max_days: float | None = None  # spawn: revive age limit for this worker; 0 = always
     session: str | None = None
     text: str | None = None
     session_id: str | None = None
@@ -292,7 +293,8 @@ def create_app() -> FastAPI:
             if not (req.title and req.prompt):
                 return {"ok": False, "output": "title and prompt required"}
             try:
-                info = workers.spawn(req.title.strip(), req.prompt, req.workdir or None, env=req.env)
+                info = workers.spawn(req.title.strip(), req.prompt, req.workdir or None, env=req.env,
+                                     resume_max_days=req.resume_max_days)
             except ValueError as e:
                 return {"ok": False, "output": str(e)}
             return {"ok": True, **info}

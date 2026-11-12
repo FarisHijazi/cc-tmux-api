@@ -60,3 +60,25 @@ def test_revive_reapplies_the_saved_env(fake, monkeypatch):
     assert len(workers.resume_registered()) == 1
     (call,) = tmux.new_sessions()
     assert call[call.index("-e") + 1] == "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=30"
+
+
+def _old_worker(fake, monkeypatch, **spawn_kw):
+    tmux, tmp = fake
+    workers.spawn("watch", "/loop watch", "/work", **spawn_kw)
+    tmux.calls.clear()
+    monkeypatch.setattr(workers, "_jsonl_path", lambda sid, wd: tmp / "reg")
+    real = workers.time.time()
+    monkeypatch.setattr(workers.time, "time", lambda: real + 30 * 86400)  # 30 days later
+    return workers.resume_registered()
+
+
+def test_revive_skips_workers_past_the_default_age(fake, monkeypatch):
+    assert _old_worker(fake, monkeypatch) == []
+
+
+def test_resume_max_days_zero_always_revives(fake, monkeypatch):
+    assert len(_old_worker(fake, monkeypatch, resume_max_days=0)) == 1
+
+
+def test_resume_max_days_overrides_the_default(fake, monkeypatch):
+    assert len(_old_worker(fake, monkeypatch, resume_max_days=60)) == 1
