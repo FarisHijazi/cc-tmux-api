@@ -226,7 +226,26 @@ def oneshot(prompt: str, timeout: int = 300) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, timeout=timeout)
 
 
-def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task") -> dict:
+ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _env_args(env: dict | None) -> list[str]:
+    """`tmux new-session -e K=V` per entry: the worker's own environment (e.g.
+    CLAUDE_AUTOCOMPACT_PCT_OVERRIDE for a long-running loop). It is kept in the
+    registry entry, so a revive after a reboot starts the worker the same way."""
+    args = []
+    for k, v in (env or {}).items():
+        if not ENV_NAME.fullmatch(str(k)):
+            raise ValueError(f"bad env name: {k!r}")
+        args += ["-e", f"{k}={v}"]
+    return args
+
+
+def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task",
+          env: dict[str, str] | None = None, resume_max_days: float | None = None) -> dict:
+    """resume_max_days overrides RESUME_MAX_DAYS for this worker's revive after a
+    reboot; 0 = always revive (an always-on loop watcher)."""
+    env_args = _env_args(env)  # validate before anything is created
     workdir = workdir or DEFAULT_WORKDIR
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:24] or "task"
     n = 1
@@ -249,7 +268,8 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
         reg.mkdir(parents=True, exist_ok=True)
         (reg / "meta.json").write_text(json.dumps({
             "session": session, "sid": sid, "title": title, "workdir": workdir,
-            "kind": kind, "created": int(time.time()),
+            "kind": kind, "created": int(time.time()), "env": env or {},
+            "resume_max_days": resume_max_days,
             # loop watchers get nudged ("continue") when revived after a reboot;
             # the /loop directive in the prompt is the source of truth
             "loop": bool(re.search(r"/loop\s", prompt)),
@@ -271,7 +291,7 @@ def spawn(title: str, prompt: str, workdir: str | None = None, kind: str = "task
     sf = PROMPT_DIR / "_headless.txt"  # stable, shared by all workers
     sf.write_text(HEADLESS_SYSTEM_PROMPT, encoding="utf-8")
 
-    r = _tmux("new-session", "-d", "-s", session, "-c", workdir)
+    r = _tmux("new-session", "-d", "-s", session, *env_args, "-c", workdir)
     if r.returncode != 0:
         raise RuntimeError(f"tmux new-session failed: {r.stderr.strip()}")
     _tmux("set-option", "-t", session, "@hq_title", title)
@@ -423,7 +443,6 @@ def resume_registered() -> list[str]:
     if not SESSIONS_DIR.is_dir():
         return []
     live = {s["name"] for s in _sessions()}
-    cutoff = time.time() - RESUME_MAX_DAYS * 86400
     revived, loops = [], []
     for meta_f in sorted(SESSIONS_DIR.glob("*/meta.json")):
         reg = meta_f.parent
@@ -437,11 +456,17 @@ def resume_registered() -> list[str]:
         wd = meta.get("workdir") or DEFAULT_WORKDIR
         if not session or not sid or session in live:
             continue
-        if meta.get("created", 0) < cutoff:
+        max_days = meta.get("resume_max_days")
+        max_days = RESUME_MAX_DAYS if max_days is None else max_days
+        if max_days > 0 and meta.get("created", 0) < time.time() - max_days * 86400:
             continue  # too old to auto-revive; still listed in the registry
         if not _jsonl_path(sid, wd).exists():
             continue  # nothing to resume from
-        r = _tmux("new-session", "-d", "-s", session, "-c", wd)
+        try:
+            env_args = _env_args(meta.get("env"))
+        except ValueError:
+            continue  # a hand-edited entry with a bad name is skipped, not half-revived
+        r = _tmux("new-session", "-d", "-s", session, *env_args, "-c", wd)
         if r.returncode != 0:
             continue
         _tmux("set-option", "-t", session, "@hq_title", meta.get("title", session))
