@@ -5,7 +5,7 @@ option selection, and action receipts. Uncertain transport failures surface an e
 OIDC tokens require exp/sub/iss/aud; metadata advertises email and offline access scopes. Existing static
 tokens remain supported for authorized machine clients. Fleet discovery and terminal writes stay in HQ.
 
-Validation: the combined branch passed all 412 tests, including 30 MCP tests. Those automated
+Validation: the combined branch passed all 415 tests, including 30 MCP tests. Those automated
 tests do not write to real sessions.
 
 The existing ftower `cc-tmux-mcp.service` was upgraded in place to wheel SHA256
