@@ -14,9 +14,11 @@ The persistent ftower aggregator is published at the requested hostname; see
 [the ftower deployment log](docs/devlog/claude_20261008-ftower-deployment.md) for
 runtime ownership and verification. Application certificate handling remains
 outside this design. Public origins can be configured without an app token.
-The public hostname now uses Traefik's `require-authentik@file` middleware on
-every path, verified against the live route on 2026-10-18. Preserve that gate;
-private peers remain token-free. The deployment owner's
+The public dashboard and API use Traefik's `require-authentik@file` middleware.
+The exact MCP and OAuth discovery paths are relayed through cc-proxy; MCP validates
+Authentik issuer/audience/expiry and the owner allowlist, or the existing machine
+token. Discovery metadata is public; anonymous MCP calls are rejected. Preserve
+these separate browser and bearer gates; private peers remain token-free. The deployment owner's
 `provision/traefik/config/cchq.yml` selects the middleware, and
 `compose/authentik/CLAUDE.md` owns the shared authentication service. The
 [auth/discovery follow-up](docs/devlog/claude_20261008-auth-and-discovery.md)

@@ -152,7 +152,7 @@ def build(http_factory=client, **server_options) -> MCPServer:
 
     @mcp.tool()
     def interrupt(session_id: str) -> dict:
-        """Interrupt (Escape) whatever the session is doing."""
+        """Interrupt the session's current work through its existing control transport."""
         return act(session_id, "interrupt")
 
     @mcp.tool()

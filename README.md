@@ -173,13 +173,16 @@ token-less node. The aggregator must bind an address the caller can reach (`CC_T
 `/mcp`. Every request needs a bearer token: either `CC_TMUX_MCP_TOKEN` (or `_FILE`, for Claude Code clients) or an
 OIDC JWT access token from `CC_TMUX_MCP_OIDC_ISSUER` with audience `CC_TMUX_MCP_OIDC_CLIENT_ID` **and** an email in
 `CC_TMUX_MCP_ALLOWED_EMAILS`. It refuses to start with neither. `CC_TMUX_MCP_PUBLIC_URL` sets the resource URL served in
-`/.well-known/oauth-protected-resource/mcp`. Route `/mcp` and `/.well-known/oauth-protected-resource` around any
-forward-auth proxy. In claude.ai, add a custom connector with that URL and the issuer's public client id.
+`/.well-known/oauth-protected-resource/mcp`. Route only the exact MCP and discovery paths through
+cc-proxy's relay; the MCP validates its bearer token instead of using browser forward-auth.
+In claude.ai, add a custom connector with the `/mcp` URL and the issuer's public client id.
 The protected-resource metadata advertises `openid email profile offline_access` for owner identity and
 refresh tokens. JWTs require expiry, subject, issuer and audience. A cc-proxy dashboard started with
 `--mcp-upstream` can publish this same adapter on its existing listener; configure
 `CC_TMUX_MCP_PUBLIC_URL` to that externally visible origin. Keep dashboard/API routes behind browser SSO;
 only the exact MCP/metadata paths use the adapter's Authentik bearer validation.
+The root `/.well-known/oauth-authorization-server` route redirects to the fixed issuer's OIDC
+metadata for clients using same-origin authorization discovery. Discovery metadata is public.
 
 ## Remote Control watchdog
 
@@ -577,9 +580,10 @@ authentication in that mode; `/api/auth` returns
 `{required:false, authenticated:true}`. Host allowlisting, same-origin checks and
 JSON mutation requirements still apply. Public HTTPS termination is supplied by
 an external reverse proxy or tunnel; no Serve or Funnel is planned.
-The deployed homelab hostname additionally requires a shared Authentik login
-for every path; successful proxy authentication does not change `/api/auth`'s
-application-level response. Preserve the proxy gate when changing routing.
+The deployed dashboard and API require a shared Authentik login; successful proxy
+authentication does not change `/api/auth`'s application-level response. The exact
+MCP route instead requires the authenticated bearer described above, with public
+OAuth discovery metadata. Preserve both authentication gates when changing routing.
 The deployment paths and authentication owner are recorded in [AGENTS.md](AGENTS.md).
 Mobile push/PWA device delivery remains unverified; server push
 availability means configured, not delivered.
