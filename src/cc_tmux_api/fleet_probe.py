@@ -540,16 +540,53 @@ def capture(pane):
     return tmux('capture-pane', '-p', '-t', pane).stdout[-LIMIT:]
 
 
+def send_screen(tail, menu):
+    """Ignore only a known active spinner's glyph and elapsed time above an empty prompt."""
+    if menu:
+        return tail
+    lines = tail.splitlines(keepends=True)
+    borders = [i for i, line in enumerate(lines) if line.startswith('───')]
+    if len(borders) < 2:
+        return tail
+    top, bottom = borders[-2:]
+    prompt = lines[top + 1:bottom]
+    if not prompt or not prompt[0].startswith('❯') or (prompt[0][1:] + ''.join(prompt[1:])).strip():
+        return tail
+    spinner = re.compile(r'^([ \t]*)[✢✳✶✻✽·] ([^\W\d_][^\d\n…]*…)'
+                         r'(?: \(\d+(?:\.\d+)?[hms](?: \d+(?:\.\d+)?[hms])*\))?([ \t]*\n?)$')
+    for index in range(top - 1, max(-1, top - 30), -1):
+        match = spinner.fullmatch(lines[index])
+        if match:
+            lines[index] = match[1] + '✻ ' + match[2] + ' (elapsed)' + match[3]
+            break
+    return ''.join(lines)
+
+
+def screen_revision(identity, pane, tail, menu):
+    state = [identity, pane['pane_current_command'], pane['cursor_x'],
+             pane['cursor_y'], pane['pane_in_mode']]
+    # Opaque revision carries an exact screen and a send-only animation view.
+    return digest([*state, tail]) + ':' + digest([*state, send_screen(tail, menu)])
+
+
+def same_revision(current, expected, action):
+    if current == expected:
+        return True
+    pattern = r'[0-9a-f]{64}:[0-9a-f]{64}'
+    return (action == 'send' and isinstance(expected, str) and
+            bool(re.fullmatch(pattern, current)) and bool(re.fullmatch(pattern, expected)) and
+            current.split(':')[1] == expected.split(':')[1])
+
+
 def inspect(pane, proc):
     tail = capture(pane['pane_id'])
     meta = metadata(pane, proc)
     identity = [pane['generation'], pane['pane_id'], pane['pane_pid'],
                 pane['session_created'], proc['pid'], proc['born']]
-    revision = digest([identity, pane['pane_current_command'], pane['cursor_x'],
-                       pane['cursor_y'], pane['pane_in_mode'], tail])
     managed = bool(pane['@hq_owner'] and pane['session_name'].startswith(pane['@hq_owner']))
     workdir = (pane['@hq_workdir'] if managed else '') or pane['pane_current_path']
     menu = parse_menu(tail)
+    revision = screen_revision(identity, pane, tail, menu)
     status = 'waiting' if menu else {'active': 'working', 'waiting': 'waiting',
                                     'idle': 'idle'}.get(_detect_claude_status(tail), 'unknown')
     # Live menu/working/waiting signals outrank earlier hook metadata. Idle
@@ -709,15 +746,17 @@ def action_keys(item, request):
 
 def perform(request):
     item = discover(request['identity'])[0]
-    if item['revision'] != request.get('revision'):
+    if not same_revision(item['revision'], request.get('revision'), request['action']):
         raise ProbeError('Screen changed; refresh before acting')
     if item['_pane']['pane_in_mode'] != '0' or '+' not in item['_proc']['state']:
         raise ProbeError('Claude is not the verified foreground target')
     keys = action_keys(item, request)
     # Re-observe after prompt helper/validation; refuse changes before writing.
     latest = discover(request['identity'])[0]
-    if latest['revision'] != item['revision']:
+    if not same_revision(latest['revision'], item['revision'], request['action']):
         raise ProbeError('Screen changed during validation')
+    if latest['_pane']['pane_in_mode'] != '0' or '+' not in latest['_proc']['state']:
+        raise ProbeError('Claude is not the verified foreground target')
     pane = item['pane']
     if request['action'] in ('send', 'type'):
         text = request['text']

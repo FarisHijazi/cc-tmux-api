@@ -498,6 +498,9 @@ prompt, or a focused free-text option for `type`, and is limited to 16,384 UTF-8
 bytes. Keys are `Up`, `Down`, `Left`, `Right`, `Space`, `Enter`, `Escape`, `Tab`,
 `BTab`, and `C-c`. Supply the latest detail's `revision` and an 8–128 character
 `request_id`. The UI sends individual navigation keys and refreshes between steps.
+Revisions are opaque. For `send` only, a known active spinner's glyph and elapsed
+duration above an empty prompt may change; output, input, cursor, pane identity
+and menus remain guarded. All other actions require the exact observed screen.
 
 Stale identity/revision conflicts return 409; validation can return 400/422 and
 unavailable hosts return 503. Successful actions require a fresh detail read;

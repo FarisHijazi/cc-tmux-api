@@ -284,6 +284,60 @@ def test_background_target_refused(monkeypatch):
         probe.perform(dict(identity=IDENTITY, revision='r1', action='key', key='Enter'))
 
 
+def animated_item(tail):
+    result = item(tail)
+    result['_pane'].update(pane_current_command='claude', cursor_x='2', cursor_y='4')
+    result['revision'] = probe.screen_revision(IDENTITY, result['_pane'], tail, result['menu'])
+    return result
+
+
+def test_send_allows_only_spinner_animation_before_and_during_validation(monkeypatch):
+    screens = [animated_item(f'Answer unchanged\n{glyph} Thinking… ({elapsed})\n────────\n❯ \n────────\n')
+               for glyph, elapsed in [('✻', '1s'), ('✢', '2s'), ('✽', '1m 3s')]]
+    results = iter([[screens[1]], [screens[2]]])
+    monkeypatch.setattr(probe, 'discover', lambda _: next(results))
+    writes = []
+    monkeypatch.setattr(probe, 'tmux', lambda *args, **kwargs: writes.append(args))
+    assert probe.perform(dict(identity=IDENTITY, revision=screens[0]['revision'], action='send',
+                              text='Next task', request_id='animated'))['ok']
+    assert writes == [('send-keys', '-t', '%121', '-l', '--', 'Next task'),
+                      ('send-keys', '-t', '%121', 'Enter')]
+
+
+@pytest.mark.parametrize('change', ['output', 'prompt', 'menu', 'cursor', 'identity', 'copy_mode',
+                                  'unknown_spinner', 'background'])
+def test_send_animation_does_not_hide_other_changes(monkeypatch, change):
+    tail = 'Answer unchanged\n✻ Thinking… (1s)\n────────\n❯ \n────────\n'
+    old = animated_item(tail)
+    new = animated_item(tail.replace('✻ Thinking… (1s)', '✢ Thinking… (2s)'))
+    if change in ('output', 'prompt', 'menu', 'unknown_spinner'):
+        new_tail = {'output': new['tail'].replace('unchanged', 'changed'),
+                    'prompt': new['tail'].replace('❯ ', '❯ human draft'),
+                    'menu': SINGLE,
+                    'unknown_spinner': new['tail'].replace('(2s)', '(unknown status)')}[change]
+        new = animated_item(new_tail)
+    elif change == 'background':
+        new['_proc']['state'] = 'S'
+    else:
+        if change == 'identity':
+            new['identity'] = [*IDENTITY[:-1], 'new process birth']
+        else:
+            new['_pane'][{'cursor': 'cursor_x', 'copy_mode': 'pane_in_mode'}[change]] = '1'
+        new['revision'] = probe.screen_revision(new['identity'], new['_pane'], new['tail'], new['menu'])
+    results = iter([[old], [new]])
+    monkeypatch.setattr(probe, 'discover', lambda _: next(results))
+    with pytest.raises(probe.ProbeError):
+        probe.perform(dict(identity=IDENTITY, revision=old['revision'], action='send',
+                           text='Next task', request_id='changed'))
+
+
+@pytest.mark.parametrize('action', ['type', 'key', 'select', 'submit'])
+def test_non_send_actions_keep_exact_screen_revision(action):
+    first = animated_item('✻ Thinking… (1s)\n────────\n❯ \n────────\n')
+    second = animated_item('✢ Thinking… (2s)\n────────\n❯ \n────────\n')
+    assert not probe.same_revision(first['revision'], second['revision'], action)
+
+
 def test_duplicate_concurrent_action_sent_once_and_conflict(monkeypatch):
     calls = []
     def fake(host, request):
