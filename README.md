@@ -492,8 +492,8 @@ open. Old waiting status does not make ended or unreachable sessions actionable.
 
 ### Actions and notifications
 
-Actions are `send` (text plus Enter), `type` (text only), `key`, `select` (zero-based
-option), and `submit` (recognized review screen). Text requires a verified empty
+Actions are `send` (text plus Enter), `type` (text only), `interrupt` (canonical
+`C-c`), `key`, `select` (zero-based option), and `submit` (recognized review screen). Text requires a verified empty
 prompt, or a focused free-text option for `type`, and is limited to 16,384 UTF-8
 bytes. Keys are `Up`, `Down`, `Left`, `Right`, `Space`, `Enter`, `Escape`, `Tab`,
 `BTab`, and `C-c`. Supply the latest detail's `revision` and an 8–128 character

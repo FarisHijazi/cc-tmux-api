@@ -584,7 +584,7 @@ def same_revision(current, expected, action, key=None):
     if current == expected:
         return True
     pattern = r'[0-9a-f]{64}:w:[0-9a-f]{64}'
-    return ((action == 'send' or action == 'key' and key == 'C-c') and isinstance(expected, str) and
+    return ((action in ('send', 'interrupt') or action == 'key' and key == 'C-c') and isinstance(expected, str) and
             bool(re.fullmatch(pattern, current)) and bool(re.fullmatch(pattern, expected)) and
             current.split(':')[2] == expected.split(':')[2])
 
@@ -720,6 +720,8 @@ def validate_text(text):
 
 def action_keys(item, request):
     action, menu = request.get('action'), item['menu']
+    if action == 'interrupt':
+        return ['C-c']
     if action in ('send', 'type'):
         validate_text(request.get('text'))
         free = bool(menu and menu['options'][menu['focused_index']].get('kind') == 'free_text')
@@ -762,7 +764,8 @@ def perform(request):
     if item['_pane']['pane_in_mode'] != '0' or '+' not in item['_proc']['state']:
         raise ProbeError('Claude is not the verified foreground target')
     keys = action_keys(item, request)
-    working_interrupt = request['action'] == 'key' and request.get('key') == 'C-c' and ':w:' in item['revision']
+    working_interrupt = (request['action'] == 'interrupt' or
+                         request['action'] == 'key' and request.get('key') == 'C-c') and ':w:' in item['revision']
     if working_interrupt and not empty_prompt(item):
         raise ProbeError('Input changed; refresh before acting')
     # Re-observe after prompt helper/validation; refuse changes before writing.

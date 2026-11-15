@@ -294,7 +294,7 @@ def animated_item(tail, status='working'):
     return result
 
 
-@pytest.mark.parametrize('action,key', [('send', None), ('key', 'C-c')])
+@pytest.mark.parametrize('action,key', [('send', None), ('interrupt', None), ('key', 'C-c')])
 def test_working_control_allows_streaming_output_before_and_during_validation(monkeypatch, action, key):
     # Real Claude streaming layout: no spinner while text grows, and the status
     # line's elapsed time changes independently of the empty input box.
@@ -313,7 +313,7 @@ def test_working_control_allows_streaming_output_before_and_during_validation(mo
 
 @pytest.mark.parametrize('change', ['prompt', 'menu', 'permission', 'cursor', 'cursor_row', 'identity',
                                   'copy_mode', 'idle', 'waiting', 'background'])
-@pytest.mark.parametrize('action,key', [('send', None), ('key', 'C-c')])
+@pytest.mark.parametrize('action,key', [('send', None), ('interrupt', None), ('key', 'C-c')])
 def test_working_control_does_not_hide_input_or_target_changes(monkeypatch, change, action, key):
     tail = 'Answer unchanged\n✻ Thinking… (1s)\n────────\n❯ \n────────\n'
     old = animated_item(tail)
@@ -347,7 +347,7 @@ def test_non_send_actions_keep_exact_screen_revision(action):
     assert not probe.same_revision(first['revision'], second['revision'], action)
 
 
-@pytest.mark.parametrize('action,key', [('send', None), ('key', 'C-c')])
+@pytest.mark.parametrize('action,key', [('send', None), ('interrupt', None), ('key', 'C-c')])
 def test_working_control_revalidates_canonical_empty_prompt(monkeypatch, action, key):
     observed = animated_item('Streaming text\n────────\n❯ \n────────\n')
     monkeypatch.setattr(probe, 'discover', lambda _: [observed])

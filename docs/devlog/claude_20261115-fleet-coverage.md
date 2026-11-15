@@ -104,3 +104,7 @@ reconcile growing messages. Row UUID takes precedence over provider message ID;
 text list blocks use the original index as a suffix. ID-less rows retain their
 previous text-only fallback, and hidden/tool content remains excluded. This is an
 extension of `transcript_messages`, not a second history reader.
+The probe also accepts the existing semantic `interrupt` action and translates
+it to `C-c`; otherwise the MCP/ACP action would pass stale-screen checks only to
+fail as unsupported. Both semantic interrupt and explicit `key=C-c` use the same
+working-input guard.
