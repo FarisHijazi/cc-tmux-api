@@ -917,8 +917,12 @@ def test_streaming_text_and_session_metadata(native):
     sid, auth, epoch = register(native)
     connected(backend, sid)
 
+    event_index = 0
+
     def stream(event):
-        return {"type": "stream_event", "uuid": str(time.time_ns()), "event": event}
+        nonlocal event_index
+        event_index += 1
+        return {"type": "stream_event", "uuid": f"stream-{event_index}", "event": event}
 
     events = [
         {"type": "system", "subtype": "init", "uuid": "init", "model": "claude-sonnet-5-5",
