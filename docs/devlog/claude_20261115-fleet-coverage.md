@@ -30,6 +30,8 @@ the existing publisher's exact `sessions/<pid>.json` through shared profile
 discovery, requiring process start marker, PID domain, stable tmux window/pane and
 timestamps newer than process birth. Linux PID domain uses `/etc/machine-id` and
 the PID namespace, matching the installed CLI; it is not the kernel boot UUID.
+Darwin converts the inventory birth time to the CLI's UTC, space-padded-day format,
+including when the host uses a different timezone or the day is a single digit.
 Publisher busy state never overrides a menu or waiting state and never supplies
 conversation identity. This adds no scanner, poller or terminal writer.
 
@@ -40,8 +42,10 @@ records keep their old fallback; hidden/tool content stays excluded.
 
 ## Active deployments
 
-All five peers run probe source through `4a62869`, SHA-256
+All four Linux peers run probe source through `4a62869`, SHA-256
 `5e79694bab26a552600679e7cb4f43232951b387df1c1df60471ce30ad5e07c3`.
+The Mac additionally runs the Darwin birth-format fix `e08dbf4`, probe SHA-256
+`15f2749fa76a1702f7606a18d3b011e3d773c27d02fd61d8a69a1b7dcf224a27`.
 The four Python peers use immutable copies of their preceding environments, with
 the probe replaced. Wrappers, config, state, dependencies and listeners remain
 under the same owners. Releases live in `~/.local/share/cc-tmux-api/releases/`.
@@ -51,7 +55,7 @@ under the same owners. Releases live in `~/.local/share/cc-tmux-api/releases/`.
 | First domain node | `31a767ecef8874b1877dbb04a9251273025e7dc8502262af400d072ca5964760` |
 | Second domain node | `5471121884aa2f1a828ea3e32108d4761c78fcfbe49181ae5e84bcfcf7d3e1e3` |
 | Empty VM peer | `d974dcbc3e9a2008d86528d7793dde19b621aad8cfe77bdaac9d896340437cf2` |
-| Mac LaunchAgent | `d617d0f800e40c1a50f9f3c67a0fa7b82c90be8bf10c0c9c8061190e76ef0ae1` |
+| Mac LaunchAgent | `1ca134f48dede8fdee508b0207eaf19510ec5c8ff27b29df151832fbe8f636bc` |
 
 The dev Rust owner embeds the probe. Its isolated build retains Rust commit
 `ecc929f`, with only probe changes, and runs
@@ -70,7 +74,7 @@ The Mac release holds `launchagent-before.plist` for its same LaunchAgent owner.
 
 ## Validation
 
-The final Python suite passes 412 tests (152 fleet cases); the dev Rust suite passes
+The final Python suite passes 415 tests (155 fleet cases); the dev Rust suite passes
 10 tests. Coverage includes stale/reused PID and wrong-pane publisher records,
 conflicting profiles, permission/menu priority, human/slash drafts, foreground
 transitions, stable transcript IDs and semantic interrupt translation.
