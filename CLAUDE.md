@@ -28,3 +28,6 @@ The fleet foreground discovery backports, guarded working-input control and
 tmux-preserving service overrides are recorded in `docs/devlog/claude_20261115-fleet-coverage.md`.
 Transcript messages retain source IDs (row UUID, otherwise provider message ID;
 text blocks suffix their original index). Keep this in the existing probe reader.
+The probe reads Claude's existing per-process publisher for hookless busy status;
+require exact process birth/domain and tmux window/pane before trusting it.
+Profile discovery is shared with `rc_watchdog`; no additional poller owns status.

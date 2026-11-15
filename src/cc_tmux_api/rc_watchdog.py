@@ -21,6 +21,8 @@ from pathlib import Path
 
 import httpx
 
+from .fleet_probe import claude_config_dirs
+
 log = logging.getLogger("rc-watchdog")
 RULE = "────"
 HUB_ID = re.compile(r"[0-9a-f]{32}")
@@ -38,11 +40,8 @@ class Session:
 
 
 def config_dirs() -> list[Path]:
-    override = os.environ.get("CC_RC_WATCHDOG_DIRS")
-    if override:
-        return [Path(p).expanduser() for p in override.split(":") if p]
     # Only launcher-routed profiles: their bridges go through the HQ, so the HQ's view is authoritative.
-    return sorted((Path.home() / ".local/state/claude-codex/account-router/accounts").glob("*/claude"))
+    return claude_config_dirs(routed_only=True)
 
 
 def _alive(pid: int) -> bool:

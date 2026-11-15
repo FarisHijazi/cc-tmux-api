@@ -14,6 +14,7 @@ from cc_tmux_api import fleet_probe as probe
 
 REAL_PROBE = fleet._probe
 REAL_NOTIFY_LIBRARY = probe.notify_library
+REAL_CLI_ACTIVITY = probe.cli_activity
 
 SID = '11111111-2222-4333-8444-555555555555'
 OTHER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -61,6 +62,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(probe, 'run', forbidden)
     monkeypatch.setattr(fleet, '_probe', forbidden)
     monkeypatch.setattr(probe, 'notify_library', lambda: None)
+    monkeypatch.setattr(probe, 'cli_activity', lambda *_: None)
     monkeypatch.setattr(fleet, 'notify_library', lambda: None)
     monkeypatch.setattr(probe.shutil, 'which', lambda _: None)
 
@@ -765,6 +767,90 @@ def test_current_terminal_supersedes_previous_stop(monkeypatch, tail, expected_s
 def test_current_work_suppresses_opaque_tab_outcome():
     result = probe.presentation({}, None, token='opaque-old-tab', status='working')
     assert result == {'status_emoji': None, 'status_label': None, 'notification_eligible': False}
+
+
+@pytest.fixture
+def cli_publisher(tmp_path, monkeypatch):
+    import os
+    import time
+    born = 'Thu Oct 08 09:00:00 2026'
+    epoch = time.mktime(time.strptime(born, '%a %b %d %H:%M:%S %Y'))
+    proc = {'pid': 101, 'born': born}
+    pane = {'window_id': '@7', 'pane_id': '%121'}
+    monkeypatch.setattr(probe, 'claude_config_dirs', lambda: [tmp_path])
+    monkeypatch.setattr(probe, 'process_marker', lambda _: ('start-ticks', 'domain'))
+    folder = tmp_path / 'sessions'
+    folder.mkdir()
+    path = folder / '101.json'
+    def publish(**changes):
+        record = dict(pid=101, kind='interactive', procStart='start-ticks', pidDomain='domain',
+                      tmux='previous-session-name:@7.%121', startedAt=(epoch + 1) * 1000,
+                      statusUpdatedAt=(epoch + 2) * 1000, status='busy')
+        record.update(changes)
+        path.write_text(json.dumps(record))
+        os.utime(path, (epoch + 3, epoch + 3))
+        return path
+    return pane, proc, publish, epoch
+
+
+def test_cli_publisher_tracks_busy_then_idle_without_adopting_session_identity(cli_publisher):
+    pane, proc, publish, _ = cli_publisher
+    publish(sessionId=OTHER)
+    assert REAL_CLI_ACTIVITY(pane, proc) == 'busy'
+    publish(status='idle', sessionId=OTHER)
+    assert REAL_CLI_ACTIVITY(pane, proc) == 'idle'
+
+
+@pytest.mark.parametrize('changes', [
+    {'pid': 102}, {'pid': '101'}, {'procStart': 'reused-pid'}, {'pidDomain': 'other-host'},
+    {'tmux': 'toy:@8.%121'}, {'tmux': 'toy:@7.%122'}, {'kind': 'sdk'},
+    {'startedAt': 0}, {'statusUpdatedAt': 0}, {'status': 'unknown'},
+])
+def test_cli_publisher_rejects_stale_or_mismatched_process(cli_publisher, changes):
+    pane, proc, publish, _ = cli_publisher
+    publish(**changes)
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+def test_cli_publisher_rejects_prior_process_file(cli_publisher):
+    import os
+    pane, proc, publish, epoch = cli_publisher
+    path = publish()
+    os.utime(path, (epoch - 1, epoch - 1))
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+def test_cli_publisher_rejects_conflicting_profiles(cli_publisher, tmp_path, monkeypatch):
+    pane, proc, publish, _ = cli_publisher
+    path = publish()
+    second = tmp_path / 'other'
+    (second / 'sessions').mkdir(parents=True)
+    (second / 'sessions/101.json').write_text(path.read_text().replace('"busy"', '"idle"'))
+    monkeypatch.setattr(probe, 'claude_config_dirs', lambda: [tmp_path, second])
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+@pytest.mark.parametrize('tail,expected', [
+    ('────────\n❯ \n────────\n', 'working'),
+    (SINGLE, 'waiting'), ('Do you want to proceed?\n', 'waiting'),
+])
+def test_cli_publisher_busy_fallback_preserves_attention(monkeypatch, tail, expected):
+    pane = {field: '' for field in probe.FIELDS}
+    pane.update(generation='server', pane_id='%121', pane_pid='100',
+                session_created='123', pane_current_path='/workspace', session_name='toy')
+    monkeypatch.setattr(probe, 'capture', lambda _: tail)
+    monkeypatch.setattr(probe, 'metadata', lambda *_: {'cli_status': 'busy'})
+    monkeypatch.setattr(probe, 'transcript_path', lambda *_: None)
+    assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
+
+
+def test_claude_config_dirs_preserves_watchdog_scope(tmp_path, monkeypatch):
+    from cc_tmux_api import rc_watchdog
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('CC_RC_WATCHDOG_DIRS', str(tmp_path / 'routed'))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'explicit'))
+    assert rc_watchdog.config_dirs() == [tmp_path / 'routed']
+    assert probe.claude_config_dirs() == [tmp_path / 'explicit', tmp_path / '.claude', tmp_path / 'routed']
 
 
 def test_missing_exact_transcript_never_adopts_nested_same_cwd(tmp_path, monkeypatch):
