@@ -226,6 +226,8 @@ def http_app():
     if issuer:
         from mcp.server.auth.routes import create_protected_resource_routes
         from pydantic import AnyHttpUrl
+        from starlette.responses import RedirectResponse
+        from starlette.routing import Route
 
         metadata = create_protected_resource_routes(
             resource_url=AnyHttpUrl(f"{public}/mcp"),
@@ -234,6 +236,11 @@ def http_app():
         )
         paths = {route.path for route in metadata}
         app.router.routes[:] = [r for r in app.routes if r.path not in paths] + metadata
+
+        async def authorization_metadata(request):
+            return RedirectResponse(issuer.rstrip("/") + "/.well-known/openid-configuration")
+
+        app.router.routes.append(Route("/.well-known/oauth-authorization-server", authorization_metadata))
     return app
 
 

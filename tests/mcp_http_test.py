@@ -77,6 +77,9 @@ def test_unauthenticated_connector_is_pointed_at_the_issuer(monkeypatch):
         assert "oauth-protected-resource" in denied.headers["www-authenticate"]
         meta = http.get("/.well-known/oauth-protected-resource/mcp").json()
         assert meta["authorization_servers"] == [ISSUER]
+        discovery = http.get("/.well-known/oauth-authorization-server", follow_redirects=False)
+        assert discovery.status_code == 307
+        assert discovery.headers["location"] == ISSUER + ".well-known/openid-configuration"
         assert meta["scopes_supported"] == ["openid", "email", "profile", "offline_access"]
 
 
