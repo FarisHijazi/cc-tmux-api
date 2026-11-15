@@ -853,6 +853,17 @@ def test_claude_config_dirs_preserves_watchdog_scope(tmp_path, monkeypatch):
     assert probe.claude_config_dirs() == [tmp_path / 'explicit', tmp_path / '.claude', tmp_path / 'routed']
 
 
+def test_linux_process_marker_matches_cli_machine_domain(monkeypatch):
+    files = {
+        '/proc/101/stat': '101 (claude command) ' + ' '.join(['S', *['0'] * 18, 'start-ticks']),
+        '/etc/machine-id': 'machine-id\n',
+    }
+    monkeypatch.setattr(probe.sys, 'platform', 'linux')
+    monkeypatch.setattr(probe.Path, 'read_text', lambda path: files[str(path)])
+    monkeypatch.setattr(probe.os, 'readlink', lambda path: 'pid:[123]')
+    assert probe.process_marker({'pid': 101}) == ('start-ticks', 'linux:machine-id:pid:[123]')
+
+
 def test_missing_exact_transcript_never_adopts_nested_same_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
     folder = tmp_path / '.claude/projects/-workspace'

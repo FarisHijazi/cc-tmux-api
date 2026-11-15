@@ -284,8 +284,8 @@ def process_marker(proc):
     try:
         if sys.platform.startswith('linux'):
             start = Path(f"/proc/{proc['pid']}/stat").read_text().rpartition(') ')[2].split()[19]
-            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip().replace('-', '')
-            return start, f"linux:{boot}:{os.readlink('/proc/self/ns/pid')}"
+            machine = Path('/etc/machine-id').read_text().strip()
+            return start, f"linux:{machine}:{os.readlink('/proc/self/ns/pid')}"
         if sys.platform == 'darwin':
             return proc['born'], 'darwin'
     except (OSError, IndexError):
