@@ -19,3 +19,6 @@ HTTP client of an HQ; keep fleet logic in the HQ, never in the MCP. Deployment: 
 it types only into idle sessions with an empty prompt, and never twice into a process whose toggle failed
 (`~/.local/state/cc-rc-watchdog/gave-up.json`): retrying flooded a live conversation with 150 `/remote-control`s. Same devlog.
 Public `/mcp` on cchq.fhijazi.com: OIDC JWT + email allowlist, or static token; never route `/api` around SSO.
+The cc-proxy MCP integration reuses this adapter and fleet; `list_nodes` exposes source health, and
+question responses require the revision returned by `read_session`. Deployment and validation:
+`docs/devlog/claude_20261115-fleet-mcp.md` (plain path).

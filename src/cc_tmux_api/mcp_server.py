@@ -6,9 +6,11 @@ import logging
 import os
 import uuid
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 MESSAGE_CHARS = 4000
 STALE_RETRIES = 5
@@ -35,7 +37,7 @@ def client() -> httpx.Client:
 def _get(http: httpx.Client, path: str) -> dict:
     response = http.get(path)
     if response.status_code >= 400:
-        raise RuntimeError(f"HQ {path} returned {response.status_code}: {response.text[:300]}")
+        raise ToolError(f"HQ {path} returned {response.status_code}: {response.text[:300]}")
     return response.json()
 
 
@@ -49,36 +51,61 @@ def _row(s: dict) -> dict:
         "status": s.get("activity") or s.get("status"),
         "waiting_on_question": bool(s.get("has_question")),
         "alive": s.get("alive", True),
+        "lifecycle": s.get("lifecycle"),
+        "online": s.get("online"),
+        "transport": s.get("transport", "tmux"),
     }
 
 
 def build(http_factory=client, **server_options) -> MCPServer:
     mcp = MCPServer("claude-sessions", **server_options)
 
-    def act(session_id: str, action: str, **fields) -> dict:
+    def act(session_id: str, action: str, revision: str = "", **fields) -> dict:
+        if action in {"select", "respond"} and not revision.strip():
+            raise ToolError("Read the session first and supply its nonempty revision")
+        path = f"/api/sessions/{quote(session_id, safe='')}"
         with http_factory() as http:
             for _ in range(STALE_RETRIES):
-                detail = _get(http, f"/api/sessions/{session_id}")
-                body = {"action": action, "revision": detail["revision"],
+                detail = _get(http, path)
+                body = {"action": action, "revision": revision or detail["revision"],
                         "request_id": uuid.uuid4().hex, **fields}
-                response = http.post(f"/api/sessions/{session_id}/action", json=body)
+                try:
+                    response = http.post(f"{path}/action", json=body)
+                except httpx.TransportError as exc:
+                    raise ToolError(f"Action delivery unknown; do not retry. request_id={body['request_id']}") from exc
                 # A 409 stale revision is rejected before delivery, so a fresh read and resend is safe.
-                if response.status_code != 409 or "refresh" not in response.text:
+                # An option belongs to the observed question, never to a refreshed one.
+                if revision or action == "select" or response.status_code != 409 or "refresh" not in response.text:
                     break
             if response.status_code >= 400:
-                raise RuntimeError(f"{action} failed with {response.status_code}: {response.text[:300]}")
-            return {"ok": True, "session": _row(detail)}
+                raise ToolError(f"{action} failed with {response.status_code}: {response.text[:300]}")
+            return {"ok": True, "session": _row(detail), "receipt": response.json(),
+                    "request_id": body["request_id"]}
+
+    @mcp.tool()
+    def list_nodes() -> list[dict]:
+        """Show every configured HQ node and discovery source, including unreachable nodes with no sessions.
+
+        These are the HQ's existing fleet health records, including cascaded peers and native sources.
+        An unavailable source does not mean its sessions ended. This does not discover new machines.
+        """
+        with http_factory() as http:
+            snapshot = _get(http, "/api/sessions")
+        return [{k: h[k] for k in ("id", "label", "available", "lifecycle", "error", "node_id",
+                                  "host_path", "federated", "native", "updated_at") if k in h}
+                for h in snapshot.get("hosts", [])]
 
     @mcp.tool()
     def list_sessions(query: str = "", host: str = "", include_ended: bool = False) -> list[dict]:
         """List Claude Code sessions on every machine the HQ federates.
 
         query filters on title, tmux session name and folder (case-insensitive);
-        host filters on the machine label, e.g. "Dev" or "Ftower".
+        host filters on the machine label, e.g. "Dev" or "Work".
+        include_ended also includes unreachable history; inspect lifecycle before acting.
         """
         with http_factory() as http:
             sessions = _get(http, "/api/sessions")["sessions"]
-        rows = [_row(s) for s in sessions if include_ended or s.get("alive", True)]
+        rows = [_row(s) for s in sessions if include_ended or s.get("alive", True) is True]
         if host:
             rows = [r for r in rows if host.lower() in str(r["host"]).lower()]
         if query:
@@ -90,12 +117,13 @@ def build(http_factory=client, **server_options) -> MCPServer:
     def read_session(session_id: str, last_messages: int = 6) -> dict:
         """Read a session's recent conversation, its screen tail, and any question it is waiting on."""
         with http_factory() as http:
-            detail = _get(http, f"/api/sessions/{session_id}")
+            detail = _get(http, f"/api/sessions/{quote(session_id, safe='')}")
         messages = [
             {"role": m.get("role"), "text": (m.get("text") or "")[-MESSAGE_CHARS:]}
             for m in (detail.get("messages") or [])[-max(1, last_messages):]
         ]
-        return {**_row(detail), "question": detail.get("menu"),
+        return {**_row(detail), "revision": detail["revision"], "question": detail.get("menu"),
+                "native_control": detail.get("native_control"), "capabilities": detail.get("capabilities"),
                 "screen_tail": (detail.get("tail") or "")[-2000:], "messages": messages}
 
     @mcp.tool()
@@ -104,9 +132,23 @@ def build(http_factory=client, **server_options) -> MCPServer:
         return act(session_id, "send", text=text)
 
     @mcp.tool()
-    def choose_option(session_id: str, index: int) -> dict:
-        """Answer the question a session is waiting on by picking an option (0-based, as read_session shows it)."""
-        return act(session_id, "select", index=index)
+    def choose_option(session_id: str, index: int, revision: str) -> dict:
+        """Pick a tmux option (0-based) in the question read_session showed. Pass that read's revision.
+
+        A changed question is rejected; read it again before deciding. Never retry an uncertain delivery.
+        """
+        return act(session_id, "select", revision=revision, index=index)
+
+    @mcp.tool()
+    def respond_native_request(session_id: str, revision: str, response: dict) -> dict:
+        """Answer the native_control request returned by read_session, using that read's revision.
+
+        response must name its request_id and behavior (allow or deny). For a question, updated_input
+        contains the tool's answered input. The HQ validates the request identity, revision and consent.
+        Only approve permissions the user authorized; never turn a computer-use dialog into generic allow.
+        A stale response is rejected without retry. Delivery queued does not mean the worker processed it.
+        """
+        return act(session_id, "respond", revision=revision, response=response)
 
     @mcp.tool()
     def interrupt(session_id: str) -> dict:
@@ -158,7 +200,7 @@ class Verifier:
         try:
             key = await asyncio.to_thread(self.jwks.get_signing_key_from_jwt, token)
             claims = self.jwt.decode(token, key.key, algorithms=["RS256", "ES256"], audience=self.client_id,
-                                     issuer=self.issuer)
+                                     issuer=self.issuer, options={"require": ["exp", "sub", "iss", "aud"]})
         except self.jwt.PyJWTError:
             return None
         if str(claims.get("email", "")).lower() not in self.emails:
@@ -180,7 +222,19 @@ def http_app():
                    # the issuer puts the client id in aud, which Verifier checks itself
                    auth=AuthSettings(issuer_url=issuer or public, resource_server_url=f"{public}/mcp",
                                      validate_token_resource=False))
-    return server.streamable_http_app(stateless_http=True, host="0.0.0.0")
+    app = server.streamable_http_app(stateless_http=True, host="0.0.0.0")
+    if issuer:
+        from mcp.server.auth.routes import create_protected_resource_routes
+        from pydantic import AnyHttpUrl
+
+        metadata = create_protected_resource_routes(
+            resource_url=AnyHttpUrl(f"{public}/mcp"),
+            authorization_servers=[AnyHttpUrl(issuer)],
+            scopes_supported=["openid", "email", "profile", "offline_access"],
+        )
+        paths = {route.path for route in metadata}
+        app.router.routes[:] = [r for r in app.routes if r.path not in paths] + metadata
+    return app
 
 
 def main():

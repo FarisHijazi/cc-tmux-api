@@ -151,9 +151,13 @@ establish that it works on a particular machine. See
 ## MCP server (talk to every session from Claude)
 
 `cc-tmux-mcp` is a stdio MCP server over any HQ's HTTP API, so one Claude Code session can list, read and
-message every session that HQ federates (all VMs when pointed at the aggregator). Tools: `list_sessions`,
-`read_session`, `send_message`, `choose_option`, `interrupt`. Writes go through the HQ's normal guarded
-`/action` path (current revision, fresh request id).
+message every session that HQ federates (all VMs when pointed at the aggregator). Tools: `list_nodes`,
+`list_sessions`, `read_session`, `send_message`, `choose_option`, `respond_native_request`, `interrupt`,
+`remote_control_health`. Writes go through the HQ's normal guarded `/action` path.
+`read_session` includes the revision and native request. Pass that observed revision when selecting a
+tmux option or answering a native request; changed questions fail without retry. Action results include
+the HQ receipt: `queued` means accepted for delivery, not acknowledged by the worker. Uncertain delivery
+must never be retried. `list_nodes` exposes unreachable sources even when they have no live sessions.
 
 ```bash
 claude mcp add -s user claude-sessions \
@@ -171,6 +175,11 @@ OIDC JWT access token from `CC_TMUX_MCP_OIDC_ISSUER` with audience `CC_TMUX_MCP_
 `CC_TMUX_MCP_ALLOWED_EMAILS`. It refuses to start with neither. `CC_TMUX_MCP_PUBLIC_URL` sets the resource URL served in
 `/.well-known/oauth-protected-resource/mcp`. Route `/mcp` and `/.well-known/oauth-protected-resource` around any
 forward-auth proxy. In claude.ai, add a custom connector with that URL and the issuer's public client id.
+The protected-resource metadata advertises `openid email profile offline_access` for owner identity and
+refresh tokens. JWTs require expiry, subject, issuer and audience. A cc-proxy dashboard started with
+`--mcp-upstream` can publish this same adapter on its existing listener; configure
+`CC_TMUX_MCP_PUBLIC_URL` to that externally visible origin. Keep dashboard/API routes behind browser SSO;
+only the exact MCP/metadata paths use the adapter's Authentik bearer validation.
 
 ## Remote Control watchdog
 

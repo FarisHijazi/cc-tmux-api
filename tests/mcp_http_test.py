@@ -50,6 +50,13 @@ def test_static_token_for_claude_code_clients(verifier):
     assert check(verifier, "s" * 39) is None
 
 
+@pytest.mark.parametrize("claim", ["exp", "sub", "iss", "aud"])
+def test_tokens_missing_required_claims_are_refused(verifier, claim):
+    claims = {"iss": ISSUER, "aud": CLIENT, "sub": "u1", "email": "user@example.com", "exp": time.time() + 600}
+    del claims[claim]
+    assert check(verifier, jwt.encode(claims, KEY, algorithm="RS256")) is None
+
+
 def test_refuses_to_start_without_any_auth(monkeypatch):
     monkeypatch.setenv("CC_TMUX_MCP_PUBLIC_URL", "https://hq.example.com")
     for name in ("CC_TMUX_MCP_OIDC_ISSUER", "CC_TMUX_MCP_TOKEN", "CC_TMUX_MCP_TOKEN_FILE", "CC_TMUX_MCP_ALLOWED_EMAILS"):
@@ -70,3 +77,20 @@ def test_unauthenticated_connector_is_pointed_at_the_issuer(monkeypatch):
         assert "oauth-protected-resource" in denied.headers["www-authenticate"]
         meta = http.get("/.well-known/oauth-protected-resource/mcp").json()
         assert meta["authorization_servers"] == [ISSUER]
+        assert meta["scopes_supported"] == ["openid", "email", "profile", "offline_access"]
+
+
+
+def test_oidc_metadata_does_not_require_oauth_scopes_from_static_clients(monkeypatch):
+    monkeypatch.setenv("CC_TMUX_MCP_PUBLIC_URL", "https://hq.example.com")
+    monkeypatch.setenv("CC_TMUX_MCP_OIDC_ISSUER", ISSUER)
+    monkeypatch.setenv("CC_TMUX_MCP_OIDC_CLIENT_ID", CLIENT)
+    monkeypatch.setenv("CC_TMUX_MCP_ALLOWED_EMAILS", "user@example.com")
+    monkeypatch.setenv("CC_TMUX_MCP_TOKEN", "test-static-token")
+    with TestClient(mcp_server.http_app(), base_url="https://hq.example.com") as http:
+        response = http.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                       "clientInfo": {"name": "test", "version": "1"}}},
+            headers={"Accept": "application/json, text/event-stream", "Authorization": "Bearer test-static-token"})
+        assert response.status_code == 200
+        assert "claude-sessions" in response.text
