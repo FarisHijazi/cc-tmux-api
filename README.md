@@ -499,10 +499,12 @@ bytes. Keys are `Up`, `Down`, `Left`, `Right`, `Space`, `Enter`, `Escape`, `Tab`
 `BTab`, and `C-c`. Supply the latest detail's `revision` and an 8–128 character
 `request_id`. The UI sends individual navigation keys and refreshes between steps.
 Revisions are opaque. While Claude is working, `send` and `C-c` can tolerate
-changing output only when both observations show the same empty input box,
+changing output only when both observations show the same canonically empty input box,
 cursor within that box, foreground process and pane identity, with no menu.
 The canonical empty-prompt check runs again before writing. All other actions
 require the exact observed screen.
+Dim input hints are decorations only when that existing prompt reader confirms
+emptiness; literal human text and slash commands remain protected.
 
 Stale identity/revision conflicts return 409; validation can return 400/422 and
 unavailable hosts return 503. Successful actions require a fresh detail read;

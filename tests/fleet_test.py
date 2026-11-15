@@ -287,7 +287,7 @@ def test_background_target_refused(monkeypatch):
 def animated_item(tail, status='working'):
     result = item(tail)
     borders = [index for index, line in enumerate(tail.splitlines()) if line.startswith('───')]
-    result['_pane'].update(pane_current_command='claude', cursor_x='2',
+    result['_pane'].update(pane_id='%121', pane_current_command='claude', cursor_x='2',
                            cursor_y=str(borders[-2] + 1) if len(borders) > 1 else '0')
     result['status'] = status
     result['revision'] = probe.screen_revision(IDENTITY, result['_pane'], tail, result['menu'], status)
@@ -356,6 +356,26 @@ def test_working_control_revalidates_canonical_empty_prompt(monkeypatch, action,
     with pytest.raises(probe.ProbeError, match='Input changed during validation; refresh before acting'):
         probe.perform(dict(identity=IDENTITY, revision=observed['revision'], action=action,
                            key=key, text='Next task', request_id='input-race'))
+
+
+def test_working_revision_uses_canonical_empty_semantics_for_placeholders(monkeypatch):
+    seen = []
+    def canonical_empty(value):
+        seen.append(value['tail'])
+        return True
+    monkeypatch.setattr(probe, 'empty_prompt', canonical_empty)
+    plain = animated_item('Streaming\n────────\n❯ \n────────\n')
+    hinted = animated_item('More streaming\n────────\n❯ Press up to edit queued messages\n────────\n')
+    assert probe.same_revision(hinted['revision'], plain['revision'], 'interrupt')
+    assert len(seen) == 2
+
+
+@pytest.mark.parametrize('draft', ['human draft', '/compact'])
+def test_working_revision_never_treats_literal_drafts_as_placeholder(draft):
+    old = animated_item('Streaming\n────────\n❯ \n────────\n')
+    new = animated_item(f'Streaming\n────────\n❯ {draft}\n────────\n')
+    assert ':w:' not in new['revision']
+    assert not probe.same_revision(new['revision'], old['revision'], 'interrupt')
 
 
 def test_duplicate_concurrent_action_sent_once_and_conflict(monkeypatch):

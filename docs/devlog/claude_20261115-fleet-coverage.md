@@ -108,3 +108,10 @@ The probe also accepts the existing semantic `interrupt` action and translates
 it to `C-c`; otherwise the MCP/ACP action would pass stale-screen checks only to
 fail as unsupported. Both semantic interrupt and explicit `key=C-c` use the same
 working-input guard.
+The subsequent live busy-send succeeded and the same CLI replied with the queued
+marker. Interrupt still conflicted because the now-queued CLI displayed a dim
+`Press up to edit queued messages` hint. Working snapshot eligibility now calls
+the existing decoration-aware empty-prompt reader, only for working sessions,
+and fingerprints the empty input semantics rather than hint text. It still
+requires the cursor in the input box and repeats canonical validation before
+writing. Literal human/slash drafts are regression-tested as ineligible.

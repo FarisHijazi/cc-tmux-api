@@ -552,7 +552,7 @@ def capture(pane):
 
 
 def working_input(pane, tail, menu, status):
-    """The exact empty input box under a working Claude, independent of output."""
+    """A canonical empty input box under a working Claude, independent of decoration."""
     if status != 'working' or menu or pane['pane_in_mode'] != '0' or pane['cursor_x'] != '2':
         return None
     lines = tail.splitlines(keepends=True)
@@ -561,11 +561,13 @@ def working_input(pane, tail, menu, status):
         return None
     top, bottom = borders[-2:]
     prompt = lines[top + 1:bottom]
-    if not prompt or not prompt[0].startswith('❯') or (prompt[0][1:] + ''.join(prompt[1:])).strip():
+    if not prompt or not prompt[0].startswith('❯'):
         return None
     if pane['cursor_y'] != str(top + 1):
         return None
-    return ''.join(lines[top:bottom + 1])
+    if not empty_prompt({'menu': menu, '_pane': pane, 'pane': pane['pane_id'], 'tail': tail}):
+        return None
+    return lines[top] + lines[bottom]
 
 
 def screen_revision(identity, pane, tail, menu, status):
