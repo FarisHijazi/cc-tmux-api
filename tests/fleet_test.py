@@ -284,51 +284,60 @@ def test_background_target_refused(monkeypatch):
         probe.perform(dict(identity=IDENTITY, revision='r1', action='key', key='Enter'))
 
 
-def animated_item(tail):
+def animated_item(tail, status='working'):
     result = item(tail)
-    result['_pane'].update(pane_current_command='claude', cursor_x='2', cursor_y='4')
-    result['revision'] = probe.screen_revision(IDENTITY, result['_pane'], tail, result['menu'])
+    borders = [index for index, line in enumerate(tail.splitlines()) if line.startswith('───')]
+    result['_pane'].update(pane_current_command='claude', cursor_x='2',
+                           cursor_y=str(borders[-2] + 1) if len(borders) > 1 else '0')
+    result['status'] = status
+    result['revision'] = probe.screen_revision(IDENTITY, result['_pane'], tail, result['menu'], status)
     return result
 
 
-def test_send_allows_only_spinner_animation_before_and_during_validation(monkeypatch):
-    screens = [animated_item(f'Answer unchanged\n{glyph} Thinking… ({elapsed})\n────────\n❯ \n────────\n')
-               for glyph, elapsed in [('✻', '1s'), ('✢', '2s'), ('✽', '1m 3s')]]
+@pytest.mark.parametrize('action,key', [('send', None), ('key', 'C-c')])
+def test_working_control_allows_streaming_output_before_and_during_validation(monkeypatch, action, key):
+    # Real Claude streaming layout: no spinner while text grows, and the status
+    # line's elapsed time changes independently of the empty input box.
+    screens = [animated_item(f'{output}\n────────\n❯ \n────────\nlast {elapsed}s ago\n')
+               for output, elapsed in [('  75.', 39), ('  75. A new cloud.\n  76.', 40), ('  76. Another cloud.', 41)]]
     results = iter([[screens[1]], [screens[2]]])
     monkeypatch.setattr(probe, 'discover', lambda _: next(results))
     writes = []
     monkeypatch.setattr(probe, 'tmux', lambda *args, **kwargs: writes.append(args))
-    assert probe.perform(dict(identity=IDENTITY, revision=screens[0]['revision'], action='send',
-                              text='Next task', request_id='animated'))['ok']
-    assert writes == [('send-keys', '-t', '%121', '-l', '--', 'Next task'),
-                      ('send-keys', '-t', '%121', 'Enter')]
+    assert probe.perform(dict(identity=IDENTITY, revision=screens[0]['revision'], action=action,
+                              key=key, text='Next task', request_id='animated'))['ok']
+    assert writes == ([('send-keys', '-t', '%121', '-l', '--', 'Next task'),
+                       ('send-keys', '-t', '%121', 'Enter')] if action == 'send' else
+                      [('send-keys', '-t', '%121', 'C-c')])
 
 
-@pytest.mark.parametrize('change', ['output', 'prompt', 'menu', 'cursor', 'identity', 'copy_mode',
-                                  'unknown_spinner', 'background'])
-def test_send_animation_does_not_hide_other_changes(monkeypatch, change):
+@pytest.mark.parametrize('change', ['prompt', 'menu', 'permission', 'cursor', 'cursor_row', 'identity',
+                                  'copy_mode', 'idle', 'waiting', 'background'])
+@pytest.mark.parametrize('action,key', [('send', None), ('key', 'C-c')])
+def test_working_control_does_not_hide_input_or_target_changes(monkeypatch, change, action, key):
     tail = 'Answer unchanged\n✻ Thinking… (1s)\n────────\n❯ \n────────\n'
     old = animated_item(tail)
     new = animated_item(tail.replace('✻ Thinking… (1s)', '✢ Thinking… (2s)'))
-    if change in ('output', 'prompt', 'menu', 'unknown_spinner'):
-        new_tail = {'output': new['tail'].replace('unchanged', 'changed'),
-                    'prompt': new['tail'].replace('❯ ', '❯ human draft'),
+    if change in ('prompt', 'menu', 'permission'):
+        new_tail = {'prompt': new['tail'].replace('❯ ', '❯ human draft'),
                     'menu': SINGLE,
-                    'unknown_spinner': new['tail'].replace('(2s)', '(unknown status)')}[change]
-        new = animated_item(new_tail)
+                    'permission': new['tail'] + 'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n'}[change]
+        new = animated_item(new_tail, 'waiting' if change in ('menu', 'permission') else 'working')
     elif change == 'background':
         new['_proc']['state'] = 'S'
     else:
         if change == 'identity':
             new['identity'] = [*IDENTITY[:-1], 'new process birth']
+        elif change in ('idle', 'waiting'):
+            new['status'] = change
         else:
-            new['_pane'][{'cursor': 'cursor_x', 'copy_mode': 'pane_in_mode'}[change]] = '1'
-        new['revision'] = probe.screen_revision(new['identity'], new['_pane'], new['tail'], new['menu'])
+            new['_pane'][{'cursor': 'cursor_x', 'cursor_row': 'cursor_y', 'copy_mode': 'pane_in_mode'}[change]] = '1'
+        new['revision'] = probe.screen_revision(new['identity'], new['_pane'], new['tail'], new['menu'], new['status'])
     results = iter([[old], [new]])
     monkeypatch.setattr(probe, 'discover', lambda _: next(results))
     with pytest.raises(probe.ProbeError):
-        probe.perform(dict(identity=IDENTITY, revision=old['revision'], action='send',
-                           text='Next task', request_id='changed'))
+        probe.perform(dict(identity=IDENTITY, revision=old['revision'], action=action,
+                           key=key, text='Next task', request_id='changed'))
 
 
 @pytest.mark.parametrize('action', ['type', 'key', 'select', 'submit'])
@@ -336,6 +345,17 @@ def test_non_send_actions_keep_exact_screen_revision(action):
     first = animated_item('✻ Thinking… (1s)\n────────\n❯ \n────────\n')
     second = animated_item('✢ Thinking… (2s)\n────────\n❯ \n────────\n')
     assert not probe.same_revision(first['revision'], second['revision'], action)
+
+
+@pytest.mark.parametrize('action,key', [('send', None), ('key', 'C-c')])
+def test_working_control_revalidates_canonical_empty_prompt(monkeypatch, action, key):
+    observed = animated_item('Streaming text\n────────\n❯ \n────────\n')
+    monkeypatch.setattr(probe, 'discover', lambda _: [observed])
+    empty = iter([True, False])
+    monkeypatch.setattr(probe, 'empty_prompt', lambda _: next(empty))
+    with pytest.raises(probe.ProbeError, match='Input changed during validation; refresh before acting'):
+        probe.perform(dict(identity=IDENTITY, revision=observed['revision'], action=action,
+                           key=key, text='Next task', request_id='input-race'))
 
 
 def test_duplicate_concurrent_action_sent_once_and_conflict(monkeypatch):
@@ -389,6 +409,28 @@ def test_transcript_tail_bounded(tmp_path):
     path = tmp_path / 'large.jsonl'
     path.write_bytes(b'x' * (probe.LIMIT + 100) + b'\n{"type":"user"}\n')
     assert probe.read_tail(path) == '{"type":"user"}\n'
+
+
+def test_transcript_preserves_distinct_source_ids_and_block_positions(tmp_path, monkeypatch):
+    path = tmp_path / f'{SID}.jsonl'
+    monkeypatch.setattr(probe, 'transcript_path', lambda *_: path)
+    entries = [
+        {'type': 'user', 'uuid': 'user-a', 'message': {'content': 'same text'}},
+        {'type': 'user', 'uuid': 'user-b', 'message': {'content': 'same text'}},
+        {'type': 'assistant', 'uuid': 'row-a', 'message': {'id': 'provider-a', 'content': [
+            {'type': 'text', 'text': 'first'}, {'type': 'tool_use', 'id': 'tool-a'},
+            {'type': 'text', 'text': 'second'}]}},
+        {'type': 'assistant', 'message': {'id': 'provider-b', 'content': [{'type': 'text', 'text': 'growing'}]}},
+    ]
+    path.write_text('\n'.join(map(json.dumps, entries)))
+    first = probe.transcript_messages({'sid': SID}, '/workspace')
+    assert [message['id'] for message in first] == ['user-a', 'user-b', 'row-a:0', 'row-a:2', 'provider-b:0']
+    entries[-1]['message']['content'][0]['text'] = 'growing answer'
+    entries[-1]['message']['content'].append({'type': 'text', 'text': 'new block'})
+    path.write_text('\n'.join(map(json.dumps, entries)))
+    updated = probe.transcript_messages({'sid': SID}, '/workspace')
+    assert updated[-2:] == [{'role': 'assistant', 'id': 'provider-b:0', 'text': 'growing answer'},
+                            {'role': 'assistant', 'id': 'provider-b:1', 'text': 'new block'}]
 
 
 @pytest.mark.parametrize('metadata', [

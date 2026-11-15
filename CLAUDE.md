@@ -24,5 +24,7 @@ fixed Authentik issuer's OIDC metadata for Claude.ai compatibility.
 The cc-proxy MCP integration reuses this adapter and fleet; `list_nodes` exposes source health, and
 question responses require the revision returned by `read_session`. Deployment and validation:
 `docs/devlog/claude_20261115-fleet-mcp.md` (plain path).
-The fleet foreground discovery backports and tmux-preserving service
-overrides are recorded in `docs/devlog/claude_20261115-fleet-coverage.md`.
+The fleet foreground discovery backports, guarded working-input control and
+tmux-preserving service overrides are recorded in `docs/devlog/claude_20261115-fleet-coverage.md`.
+Transcript messages retain source IDs (row UUID, otherwise provider message ID;
+text blocks suffix their original index). Keep this in the existing probe reader.

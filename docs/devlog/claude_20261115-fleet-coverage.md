@@ -44,3 +44,63 @@ Menus, drafts, output, cursor position, copy mode, identity, stopped/background
 processes and other actions remain guarded. The final foreground state is checked
 again immediately before writing. Fleet tests pass 103/103; full suite 363/363.
 This code validation does not establish deployment or live busy-session delivery.
+
+## Spinner deployment
+
+The three Python VM peers now use immutable copies of their preceding environments,
+with only the spinner guard and the already-existing unreadable-plugin-path guard
+backported into `fleet_probe.py`. Each exact module passed all 103 fleet regressions.
+Their probe SHA-256 is
+`ed8a082a559ef8f52a2c649fa609c0241e4c84259fcc4bd55095e523c985a17d`.
+
+| Node | New immutable release |
+| --- | --- |
+| First domain node | `d03fc1e35869e93d46c6a4d9ac7723962e250652fa01d284369b013c7a0d88f4` |
+| Second domain node | `a645907dee9fa1aaad18615ec003673b96413c19d4ac295c41798173d0aa4e17` |
+| Empty VM peer | `8f4136a00f4841fee3bb441589faf0ec39a516ba003944082ba89c0a97606a05` |
+| Mac | `84140531f120c40ed57ae4f40b0ac143130f048b80a10ab8266a559bb9e7fc81` |
+
+VM units select these through `92-spinner-guard.conf`, preserving `KillMode=process`.
+All eight domain-node interactive Claude PIDs survived unchanged. The empty peer
+had no Claude or tmux processes. The Mac's same `com.local.cc-tmux-hq` LaunchAgent
+now uses an immutable copy of its existing venv/package plus the same probe change.
+Its prior plist is `launchagent-before.plist` in that release. A bootstrap attempted
+immediately after bootout returned I/O error 5; repeating bootstrap after the old
+job exited succeeded. One HQ process/listener remains, with the original tmux and
+interactive Claude PIDs unchanged. All peer APIs were subsequently healthy.
+
+The root aggregator was not restarted: all current tmux session actions route to
+their peer owner, while root-native control has its separate revision protocol.
+
+The dev node's Rust owner embedded the probe at compile time. Built an isolated
+worktree at the exact existing Rust commit `ecc929f`, applying only the probe
+change and existing unreadable-path guard. All 10 Rust unit tests and 103 probe
+regressions passed before installation. The binary is
+`~/.local/lib/cc-tmux-api-rust/cc-tmux-api-ecc929f-affea8a`, selected by the same
+unit's `zz-fleet-probe.conf` with `KillMode=process`; its SHA-256 is
+`49b282ffdc9096ed7677e6227912e8061e3621e1de7958d448c847b3b3230ea4`.
+All nine preexisting panes and interactive Claude PIDs, including the test toy,
+survived the restart. The unit was active with zero automatic restarts. Its probe
+matches the upstream source bytes; Python backport hashes differ only in blank
+lines between the three inserted helper functions.
+
+## Streaming input follow-up
+
+Live public MCP testing exposed the spinner-only limit: both sending and
+interrupting failed with pre-delivery stale-screen conflicts during a 100-sentence
+toy response. Captured consecutive screens showed text streaming without a spinner,
+an unchanged empty input box/cursor, and a custom footer whose elapsed time ticked.
+
+The revised guard records a separate working-input revision only while the existing
+classifier/hook policy says working and the exact empty box contains the cursor.
+Only `send` and `C-c` may compare that revision. Their input, foreground and copy-mode
+checks run on both observations; the canonical prompt reader checks emptiness again
+before writing. Menus, user drafts, idle/waiting transitions, changed identity and
+other keys retain exact-screen guards. Definitive pre-write validation conflicts
+now say `refresh before acting`, matching existing safe-retry clients.
+
+Transcript messages additionally preserve source identity for existing clients to
+reconcile growing messages. Row UUID takes precedence over provider message ID;
+text list blocks use the original index as a suffix. ID-less rows retain their
+previous text-only fallback, and hidden/tool content remains excluded. This is an
+extension of `transcript_messages`, not a second history reader.
