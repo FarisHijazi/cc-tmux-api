@@ -864,6 +864,15 @@ def test_linux_process_marker_matches_cli_machine_domain(monkeypatch):
     assert probe.process_marker({'pid': 101}) == ('start-ticks', 'linux:machine-id:pid:[123]')
 
 
+@pytest.mark.parametrize('utc_offset,expected_hour', [(0, '12'), (3, '09'), (-7, '19')])
+def test_darwin_process_marker_preserves_utc_and_padded_day(monkeypatch, utc_offset, expected_hour):
+    import calendar
+    monkeypatch.setattr(probe.sys, 'platform', 'darwin')
+    monkeypatch.setattr(probe.time, 'mktime', lambda parsed: calendar.timegm(parsed) - utc_offset * 3600)
+    assert probe.process_marker({'born': 'Tue Nov 3 12:34:56 2026'}) == (
+        f'Tue Nov  3 {expected_hour}:34:56 2026', 'darwin')
+
+
 def test_missing_exact_transcript_never_adopts_nested_same_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
     folder = tmp_path / '.claude/projects/-workspace'

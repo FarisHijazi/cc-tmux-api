@@ -287,8 +287,9 @@ def process_marker(proc):
             machine = Path('/etc/machine-id').read_text().strip()
             return start, f"linux:{machine}:{os.readlink('/proc/self/ns/pid')}"
         if sys.platform == 'darwin':
-            return proc['born'], 'darwin'
-    except (OSError, IndexError):
+            born = time.mktime(time.strptime(proc['born'], '%a %b %d %H:%M:%S %Y'))
+            return time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(born)), 'darwin'
+    except (OSError, IndexError, ValueError):
         pass
     return None, None
 
