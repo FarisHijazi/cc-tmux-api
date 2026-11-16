@@ -15,10 +15,12 @@ import secrets
 import threading
 import time
 from collections import OrderedDict
+from functools import wraps
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException, Request
+from anyio import CancelScope
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from . import rc_mirror
@@ -76,6 +78,15 @@ def _frame(event):
         f"event: client_event\nid: {event['sequence_num']}\n"
         f"data: {json.dumps(event, separators=(',', ':'))}\n\n"
     )
+
+
+def _offload(function):
+    @wraps(function)
+    async def handle(*args, **kwargs):
+        # Registry lock waiters must not occupy FastAPI's shared request pool.
+        return await asyncio.to_thread(function, *args, **kwargs)
+
+    return handle
 
 
 class NativeRemote:
@@ -918,14 +929,20 @@ class NativeRemote:
     def router(self):
         router = APIRouter(prefix="/v1/code/sessions")
 
-        @router.post("")
-        async def create(request: Request):
+        async def launch_body(request: Request):
             self._launch_auth(request)
+            return await self._body(request)
+
+        async def worker_body(request: Request):
+            return await self._body(request) if request.method != "GET" else {}
+
+        @router.post("")
+        @_offload
+        def create(request: Request, body: dict = Depends(launch_body)):
             if request.headers.get("x-hq-mirror"):
                 # An account proxy without the mirror passthrough routed this hub's own
                 # upstream registration back here; accepting it would mirror it again.
                 raise HTTPException(508, "HQ mirror request looped back; update the account proxy")
-            body = await self._body(request)
             config = body.get("config", {})
             if not isinstance(config, dict) or not isinstance(body.get("title", ""), str):
                 raise HTTPException(400, "Invalid native session configuration")
@@ -960,9 +977,8 @@ class NativeRemote:
             return {"session": {"id": sid}}
 
         @router.post("/{sid}/bridge")
-        async def bridge(sid: str, request: Request):
-            self._launch_auth(request)
-            body = await self._body(request)
+        @_offload
+        def bridge(sid: str, request: Request, body: dict = Depends(launch_body)):
             with self._lock:
                 session = self._get(sid)
                 if session["archived"]:
@@ -992,7 +1008,8 @@ class NativeRemote:
                 )
 
         @router.get("/{sid}/worker/events/stream")
-        async def stream(sid: str, request: Request):
+        @_offload
+        def stream(sid: str, request: Request):
             with self._lock:
                 session = self._get(sid)
                 self._worker_auth(request, session)
@@ -1009,27 +1026,47 @@ class NativeRemote:
                 raise HTTPException(400, "Invalid native event cursor") from exc
             self.replay(sid, cursor)
             lease = {"epoch": epoch, "id": str(uuid4())}
-            with self._lock:
-                self._declare_dialogs(session)
-                self._streams[sid] = lease
-                self._touch(session)
-                self._mirror(session)
+            closed = threading.Event()
+
+            def register():
+                with self._lock:
+                    if closed.is_set() or session["archived"] or session["epoch"] != epoch:
+                        return False
+                    self._declare_dialogs(session)
+                    if closed.is_set():
+                        return False
+                    self._streams[sid] = lease
+                    self._touch(session)
+                    self._mirror(session)
+                    return True
+
+            def current():
+                with self._lock:
+                    return not session["archived"] and self._streams.get(sid) == lease
+
+            def next_events(cursor):
+                with self._lock:
+                    return self.replay(sid, cursor) if current() else None
+
+            def release():
+                with self._lock:
+                    if self._streams.get(sid) == lease:
+                        self._streams.pop(sid, None)
 
             async def generate():
                 nonlocal cursor
                 try:
+                    if not await asyncio.to_thread(register):
+                        return
                     yield ": connected\n\n"
                     last_keepalive = time.monotonic()
                     while True:
-                        with self._lock:
-                            if session["archived"] or self._streams.get(sid) != lease:
-                                return
-                        if await request.is_disconnected():
+                        events = await asyncio.to_thread(next_events, cursor)
+                        if events is None or await request.is_disconnected():
                             return
-                        for event in self.replay(sid, cursor):
-                            with self._lock:
-                                if self._streams.get(sid) != lease:
-                                    return
+                        for event in events:
+                            if not await asyncio.to_thread(current):
+                                return
                             yield _frame(event)
                             cursor = event["sequence_num"]
                         if time.monotonic() - last_keepalive >= 10:
@@ -1037,9 +1074,9 @@ class NativeRemote:
                             last_keepalive = time.monotonic()
                         await asyncio.sleep(0.1)
                 finally:
-                    with self._lock:
-                        if self._streams.get(sid) == lease:
-                            self._streams.pop(sid, None)
+                    closed.set()
+                    with CancelScope(shield=True):
+                        await asyncio.to_thread(release)
 
             return StreamingResponse(
                 generate(),
@@ -1048,8 +1085,8 @@ class NativeRemote:
             )
 
         @router.api_route("/{sid}/worker", methods=["GET", "PUT"])
-        async def worker(sid: str, request: Request):
-            body = await self._body(request) if request.method == "PUT" else {}
+        @_offload
+        def worker(sid: str, request: Request, body: dict = Depends(worker_body)):
             with self._lock:
                 session = self._get(sid)
                 self._worker_auth(request, session)
@@ -1087,8 +1124,10 @@ class NativeRemote:
                 )
 
         @router.post("/{sid}/worker/{operation:path}")
-        async def worker_post(sid: str, operation: str, request: Request):
-            body = await self._body(request)
+        @_offload
+        def worker_post(
+            sid: str, operation: str, request: Request, body: dict = Depends(worker_body)
+        ):
             with self._lock:
                 session = self._get(sid)
                 self._worker_auth(request, session)
@@ -1178,7 +1217,8 @@ class NativeRemote:
                 raise HTTPException(404, "Unsupported native worker operation")
 
         @router.get("/{sid}")
-        async def get_session(sid: str, request: Request):
+        @_offload
+        def get_session(sid: str, request: Request):
             self._launch_auth(request)
             with self._lock:
                 session = self._get(sid)
@@ -1191,9 +1231,8 @@ class NativeRemote:
                 }
 
         @router.patch("/{sid}")
-        async def rename(sid: str, request: Request):
-            self._launch_auth(request)
-            body = await self._body(request)
+        @_offload
+        def rename(sid: str, request: Request, body: dict = Depends(launch_body)):
             with self._lock:
                 session = self._get(sid)
                 if not isinstance(body.get("title"), str):
@@ -1204,7 +1243,8 @@ class NativeRemote:
             return {}
 
         @router.post("/{sid}/archive")
-        async def archive(sid: str, request: Request):
+        @_offload
+        def archive(sid: str, request: Request):
             self._launch_auth(request)
             with self._lock:
                 session = self._get(sid)

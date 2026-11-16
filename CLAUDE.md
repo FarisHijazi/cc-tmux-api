@@ -21,6 +21,9 @@ Claude Remote Control links and model settings remain capability-gated.
 All six existing HQ owners run the 0.9.0 wheel recorded in the Codex devlog;
 Dev now uses the same Python owner after explicit Rust API/state parity.
 Native launch keys are private runtime files; never place their values in docs.
+Native registry routes and SSE lock access run off the HTTP event loop and outside
+FastAPI's shared request pool. Keep each mutation, lock and durable save together;
+never acknowledge a worker event before its atomic registry replacement finishes.
 Computer-use protocol support, deployed consent tests and account/OS limits are recorded
 in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).
 The native-first UI and the Remote Control protocol as claude.ai uses it (captured
