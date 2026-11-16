@@ -45,6 +45,10 @@ question responses require the revision returned by `read_session`. Deployment a
 `docs/devlog/claude_20261115-fleet-mcp.md` (plain path).
 The fleet foreground discovery backports, guarded working-input control and
 tmux-preserving service overrides are recorded in `docs/devlog/claude_20261115-fleet-coverage.md`.
+`GET /api/sessions?include_ended=false` propagates live-only reads through peers;
+the default retains full history. Filter only after the owner's lifecycle census,
+and keep full/live snapshot and reachability caches separate. MCP discovery uses
+this query and still filters locally for older peers that ignore it.
 Transcript messages retain source IDs (row UUID, otherwise provider message ID;
 text blocks suffix their original index). Keep this in the existing probe reader.
 The probe reads Claude's existing per-process publisher for hookless busy status

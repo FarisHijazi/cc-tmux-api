@@ -105,7 +105,7 @@ def build(http_factory=client, **server_options) -> MCPServer:
         include_ended also includes unreachable history; inspect lifecycle before acting.
         """
         with http_factory() as http:
-            sessions = _get(http, "/api/sessions")["sessions"]
+            sessions = _get(http, f"/api/sessions?include_ended={str(include_ended).lower()}")["sessions"]
         rows = [_row(s) for s in sessions if include_ended or s.get("alive", True) is True]
         if host:
             rows = [r for r in rows if host.lower() in str(r["host"]).lower()]

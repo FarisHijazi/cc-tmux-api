@@ -47,8 +47,10 @@ def cluster(monkeypatch):
         target = urlparse.urlsplit(host['url']).hostname.split('.')[0]
         owner = modules[target]
         calls.append((target, endpoint, tuple(path), copy.deepcopy(payload)))
-        if endpoint == '/api/sessions':
-            return owner.snapshot(path=path)
+        parsed = urlparse.urlsplit(endpoint)
+        if parsed.path == '/api/sessions':
+            query = urlparse.parse_qs(parsed.query)
+            return owner.snapshot(path=path, include_ended=query.get('include_ended', ['true']) != ['false'])
         suffix = endpoint.removeprefix('/api/sessions/')
         if payload is None:
             return owner.detail(urlparse.unquote(suffix), path=path)
@@ -136,6 +138,73 @@ def test_path_aware_cache_cannot_bypass_cycle_guard(cluster):
     assert calls[0][2] == ('c', 'a')
     with pytest.raises(nodes['a'].FleetError):
         nodes['a'].snapshot(path=('a',))
+
+
+def add_retained_history(value):
+    live = value['sessions'][0]
+    value['sessions'].append(dict(live, id=live['id'] + '-ended', origin_id='retained-ended',
+                                  alive=False, lifecycle='ended', ended_at=40))
+    value['sessions'].append(dict(live, id=live['id'] + '-offline', origin_id='retained-offline',
+                                  alive=None, lifecycle='unreachable'))
+    return value
+
+
+def test_live_query_reaches_every_peer_without_poisoning_full_history_cache(cluster, monkeypatch):
+    nodes, configs, calls, _ = cluster
+    configs['a'].append(peer('b'))
+    configs['b'].append(peer('c'))
+    monkeypatch.setattr(nodes['c'], '_observe_local', add_retained_history)
+    assert len(nodes['a'].snapshot()['sessions']) == 3
+    calls.clear()
+    live = nodes['a'].snapshot(include_ended=False)
+    assert len(live['sessions']) == 1 and live['sessions'][0]['alive'] is True
+    assert {(target, endpoint) for target, endpoint, _, _ in calls} == {
+        ('b', '/api/sessions?include_ended=false'), ('c', '/api/sessions?include_ended=false')}
+    assert len(nodes['a'].snapshot()['sessions']) == 3
+    assert len(nodes['c']._cache['history']['sessions']) == 3
+
+
+def test_live_query_filters_older_peer_that_ignores_query(cluster, monkeypatch):
+    nodes, configs, calls, _ = cluster
+    configs['a'].append(peer('c'))
+    monkeypatch.setattr(nodes['c'], '_observe_local', add_retained_history)
+    transport = nodes['a']._peer
+    monkeypatch.setattr(nodes['a'], '_peer', lambda host, endpoint, path:
+                        transport(host, endpoint.split('?')[0], path))
+    rows = nodes['a'].snapshot(include_ended=False)['sessions']
+    assert len(rows) == 1 and rows[0]['alive'] is True
+
+
+def test_live_peer_cache_does_not_discard_full_history_during_outage(cluster, monkeypatch):
+    nodes, configs, _, _ = cluster
+    configs['a'].append(peer('c'))
+    monkeypatch.setattr(nodes['c'], '_observe_local', add_retained_history)
+    nodes['a'].snapshot()
+    nodes['a'].snapshot(include_ended=False)
+    def offline(*args, **kwargs):
+        raise nodes['a'].FleetError('offline', 503)
+    monkeypatch.setattr(nodes['a'], '_peer', offline)
+    nodes['a']._cache.pop('entries', None)
+    assert nodes['a'].snapshot(include_ended=False)['sessions'] == []
+    full = nodes['a'].snapshot()['sessions']
+    assert len(full) == 3
+    assert any(row['lifecycle'] == 'ended' for row in full)
+
+
+def test_live_query_keeps_owner_observation_and_ended_persistence(cluster, monkeypatch, tmp_path):
+    from cc_tmux_api.session_history import SessionHistory
+
+    nodes, _, _, _ = cluster
+    owner = nodes['c']
+    history = SessionHistory(tmp_path)
+    monkeypatch.setattr(owner, '_observe_local', history.observe)
+    original, = owner.snapshot(include_ended=False)['sessions']
+    monkeypatch.setattr(owner, '_probe', lambda *_: {'sessions': []})
+    owner._cache.pop('entries', None)
+    assert owner.snapshot(include_ended=False)['sessions'] == []
+    ended, = owner.snapshot()['sessions']
+    assert ended['id'] == original['id']
+    assert ended['lifecycle'] == 'ended' and ended['ended_at'] is not None
 
 
 def test_diamond_deduplicates_owner_origin(cluster):

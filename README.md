@@ -453,7 +453,7 @@ bodies (`{}`) for logout and test push. The contracts live in
 | `GET /api/auth` | `{required, authenticated}`; public |
 | `POST /api/auth/login` | `{token}` → `{ok}` and signed pairing cookie; public, rate limited |
 | `POST /api/auth/logout` | `{}` → `{ok}`; clears this browser's cookie |
-| `GET /api/sessions` | `{node_id, hosts, sessions, updated_at}`; hosts report `available`, lifecycle and optional `error` |
+| `GET /api/sessions` | `{node_id, hosts, sessions, updated_at}`; hosts report `available`, lifecycle and optional `error`. Optional `include_ended=false` returns only live sessions across peers; the default retains full history. |
 | `GET /api/sessions/{id}` | Session detail, including `tail`, `messages`, recognized `menu` or null, and `transcript_status` on live probe detail |
 | `POST /api/sessions/{id}/action` | `{action, revision, request_id, text?, key?, index?, response?}` → `{ok, id, request_id, revision, refresh_required?}` |
 | `GET /api/push` | `{available, public_key, reason?}` |

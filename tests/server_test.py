@@ -67,6 +67,21 @@ def test_api_never_cached_and_static_shell_is_public(client):
     assert client.get("/api/auth").headers["cache-control"] == "no-store"
 
 
+@pytest.mark.parametrize('query,include_ended', [('', True), ('?include_ended=true', True),
+                                               ('?include_ended=false', False)])
+def test_sessions_query_preserves_full_history_default(client, monkeypatch, query, include_ended):
+    from cc_tmux_api import fleet
+
+    pair(client)
+    calls = []
+    def snapshot(**kwargs):
+        calls.append(kwargs)
+        return {'hosts': [], 'sessions': []}
+    monkeypatch.setattr(fleet, 'snapshot', snapshot)
+    assert client.get('/api/sessions' + query, headers={'X-HQ-Path': 'parent'}).status_code == 200
+    assert calls == [{'path': ('parent',), 'include_ended': include_ended}]
+
+
 def test_pairing_rate_limit(client):
     for _ in range(10):
         assert client.post("/api/auth/login", json={"token": "wrong"}).status_code == 401

@@ -57,6 +57,21 @@ def test_lists_live_sessions_across_hosts_and_filters(hq):
     assert call(server, "list_sessions")[0]["title"] == "ai course"
 
 
+@pytest.mark.parametrize("include_ended", [False, True])
+def test_discovery_requests_only_the_history_the_caller_needs(include_ended):
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        # Older HQs may ignore the query; the MCP must retain its local filter.
+        return httpx.Response(200, json={"sessions": SESSIONS})
+
+    server = mcp_server.build(lambda: httpx.Client(base_url="http://hq", transport=httpx.MockTransport(handler)))
+    rows = call(server, "list_sessions", include_ended=include_ended)
+    assert requests[0].url.params["include_ended"] == str(include_ended).lower()
+    assert [row["id"] for row in rows] == (["a", "b", "c"] if include_ended else ["a", "b"])
+
+
 def test_read_session_shows_question_and_messages(hq):
     server, _ = hq
     detail = call(server, "read_session", session_id="b")

@@ -342,12 +342,13 @@ def _local_snapshot(config):
         return result
 
 
-def _peer_snapshot(host, context):
+def _peer_snapshot(host, context, include_ended=True):
     root = dict(id=host['id'], label=host['label'], host_path=[host['id']],
                 available=False, lifecycle='unreachable', updated_at=time.time(), federated=True)
-    key = (node_id(), host['id'], host['url'])
+    key = (node_id(), host['id'], host['url'], include_ended)
     try:
-        response = _peer(host, '/api/sessions', context)
+        endpoint = '/api/sessions' if include_ended else '/api/sessions?include_ended=false'
+        response = _peer(host, endpoint, context)
         if not isinstance(response.get('hosts'), list) or not isinstance(response.get('sessions'), list):
             raise FleetError('Invalid peer snapshot', 502)
         child_hosts = []
@@ -381,10 +382,10 @@ def _peer_snapshot(host, context):
         return [root, *children], old[1]
 
 
-def snapshot(path=()):
+def snapshot(path=(), *, include_ended=True):
     context = _context(path)  # Check BEFORE any cache/target lock or network IO.
     config = [] if os.environ.get('CC_TMUX_NATIVE_ONLY') == '1' else hosts()
-    cache_key = (context, json.dumps(config, sort_keys=True))
+    cache_key = (context, json.dumps(config, sort_keys=True), include_ended)
     with _cache_lock:
         entry = _cache.get('entries', {}).get(cache_key)
         if entry and time.monotonic() - entry['at'] < 3:
@@ -394,7 +395,7 @@ def snapshot(path=()):
     peers = [h for h in config if h.get('url')]
     with ThreadPoolExecutor(max_workers=min(8, len(peers) + 1)) as pool:
         local_future = pool.submit(_local_snapshot, config)
-        futures = [pool.submit(_peer_snapshot, h, context) for h in peers]
+        futures = [pool.submit(_peer_snapshot, h, context, include_ended) for h in peers]
         local = local_future.result()
         results = [f.result() for f in futures]
     sessions = local['sessions'] + [s for r in results for s in r[1]]
@@ -404,8 +405,11 @@ def snapshot(path=()):
         previous = unique.get(key)
         if previous is None or (previous.get('lifecycle') == 'unreachable' and session.get('lifecycle') != 'unreachable'):
             unique[key] = session
+    rows = list(unique.values())
+    if not include_ended:
+        rows = [s for s in rows if s.get('alive', True) is True]
     result = dict(hosts=local['hosts'] + [h for r in results for h in r[0]],
-                  sessions=list(unique.values()), updated_at=time.time(), node_id=node_id())
+                  sessions=rows, updated_at=time.time(), node_id=node_id())
     with _cache_lock:
         entries = _cache.setdefault('entries', {})
         if len(entries) >= 128:
