@@ -252,6 +252,26 @@ def test_permission_is_explicit_one_time_exact_request_and_resolved_by_owner(own
     assert owner.backend.detail(SID)["native_control"] is None
 
 
+@pytest.mark.parametrize("method", ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"])
+@pytest.mark.parametrize("available,expected", [
+    (["accept", {"acceptWithExecpolicyAmendment": {"execpolicyAmendment": ["echo"]}}, "cancel"], "cancel"),
+    (["accept", "cancel", "decline"], "decline"),
+    (None, "decline"),
+    (["accept"], None),
+])
+def test_denial_uses_only_a_native_offered_negative_decision(owner, method, available, expected):
+    row = pending(owner, method, availableDecisions=available)
+    response = {"request_id": row["native_control"]["request_id"], "behavior": "deny"}
+    if expected is None:
+        with pytest.raises(FleetError, match="not offered"):
+            owner.backend.act(SID, "respond", row["revision"], "deny", response=response)
+        assert not any("result" in call for call in owner.calls)
+        assert owner.backend.detail(SID)["native_control"] is not None
+    else:
+        owner.backend.act(SID, "respond", row["revision"], "deny", response=response)
+        assert owner.calls[-1] == {"id": 42, "result": {"decision": expected}}
+
+
 def test_terminal_answered_permission_cannot_be_answered_again(owner):
     row = pending(owner)
     owner.emit({"method": "serverRequest/resolved", "params": {"threadId": SID, "requestId": 42}})

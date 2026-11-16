@@ -16,6 +16,8 @@ Tests disable automatic Codex discovery in `tests/conftest.py`; protocol tests
 must supply isolated sockets or fakes before explicitly enabling it.
 Codex runtime settings are in `README.md#existing-codex-sessions`; rollout and
 version compatibility evidence is in `docs/devlog/claude_20261116-codex-fleet.md`.
+Codex denial uses the request's offered negative decision: `decline`, or `cancel`
+when decline is unavailable. Never widen approval or send an unoffered decision.
 The UI shares native control rendering but respects per-action capabilities;
 Claude Remote Control links and model settings remain capability-gated.
 All six existing HQ owners and the public MCP adapter run the 0.9.2 wheel recorded in the Codex devlog;

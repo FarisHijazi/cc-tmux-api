@@ -210,6 +210,8 @@ def _answer(request, response):
     if method in {"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}:
         decision = "accept" if behavior == "allow" else "decline"
         available = params.get("availableDecisions")
+        if behavior == "deny" and available is not None and "decline" not in available and "cancel" in available:
+            decision = "cancel"
         if available is not None and decision not in available:
             raise _error("This decision is not offered by the native request", 400)
         return {"decision": decision}
