@@ -305,7 +305,7 @@ def cli_activity(pane, proc):
     marker, domain = process_marker(proc)
     if not marker:
         return None
-    statuses = set()
+    statuses = {}
     route = f":{pane['window_id']}.{pane['pane_id']}"
     for root in claude_config_dirs():
         path = root / 'sessions' / f"{proc['pid']}.json"
@@ -321,14 +321,20 @@ def cli_activity(pane, proc):
                     not isinstance(data.get('statusUpdatedAt'), (int, float)) or data['statusUpdatedAt'] / 1000 < born):
                 continue
             if data.get('status') in ('busy', 'idle'):
-                statuses.add(data['status'])
+                status = data['status']
+                statuses[status] = max(statuses.get(status, 0), data['statusUpdatedAt'] / 1000)
         except (OSError, ValueError, TypeError):
             continue
-    return next(iter(statuses)) if len(statuses) == 1 else None
+    if len(statuses) == 1:
+        status, updated_at = next(iter(statuses.items()))
+        return {'status': status, 'updated_at': updated_at}
+    return None
 
 
 def metadata(pane, proc):
     activity = cli_activity(pane, proc)
+    publisher = ({'cli_status': activity['status'], 'cli_status_ts': activity['updated_at']}
+                 if activity else {})
     sid = argv_sid(proc)
     exact = f"{pane['session_name']}:{pane['window_index']}.{pane['pane_index']}"
     events = []
@@ -353,10 +359,10 @@ def metadata(pane, proc):
     # @hq_sid describes launch intent, not the current runtime UUID. It must
     # never override argv/exact event evidence after resume or replacement.
     if not sid:
-        return {'cli_status': activity} if activity else {}
+        return publisher
     matching = [e for e in current if e['sid'] == sid]
     event = max(matching, key=lambda e: e['ts'], default={})
-    result = dict(event, sid=sid, cli_status=activity)
+    result = dict(event, sid=sid, **publisher)
     state = NOTIFY_STATE
     route = route_data(state / f'{sid}.route')
     if not route.get('remote_host') and route.get('tmux_target') in (exact, pane['pane_id']):
@@ -665,7 +671,11 @@ def inspect(pane, proc):
     # or unknown terminal output can still use the last lifecycle event.
     if status not in ('working', 'waiting'):
         if meta.get('event') in ('prompt', 'tool', 'compact'):
-            status = 'working'
+            newer_idle = (meta.get('cli_status') == 'idle' and
+                          isinstance(meta.get('cli_status_ts'), (int, float)) and
+                          isinstance(meta.get('ts'), (int, float)) and
+                          meta['cli_status_ts'] > meta['ts'])
+            status = 'idle' if newer_idle else 'working'
         elif meta.get('event') == 'menu':
             status = 'waiting'
         elif meta.get('event') == 'stop':

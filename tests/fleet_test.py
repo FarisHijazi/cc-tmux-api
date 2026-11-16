@@ -794,11 +794,22 @@ def cli_publisher(tmp_path, monkeypatch):
 
 
 def test_cli_publisher_tracks_busy_then_idle_without_adopting_session_identity(cli_publisher):
-    pane, proc, publish, _ = cli_publisher
+    pane, proc, publish, epoch = cli_publisher
     publish(sessionId=OTHER)
-    assert REAL_CLI_ACTIVITY(pane, proc) == 'busy'
+    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'busy', 'updated_at': epoch + 2}
     publish(status='idle', sessionId=OTHER)
-    assert REAL_CLI_ACTIVITY(pane, proc) == 'idle'
+    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'idle', 'updated_at': epoch + 2}
+
+
+def test_metadata_preserves_verified_publisher_time_without_guessing_identity(cli_publisher, monkeypatch):
+    pane, proc, publish, epoch = cli_publisher
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    publish(status='idle', sessionId=OTHER)
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe, 'argv_sid', lambda _: None)
+    monkeypatch.setattr(probe, 'route_sid', lambda *_: None)
+    monkeypatch.setattr(probe, 'json_lines', lambda _: [])
+    assert probe.metadata(pane, proc) == {'cli_status': 'idle', 'cli_status_ts': epoch + 2}
 
 
 @pytest.mark.parametrize('changes', [
@@ -841,6 +852,34 @@ def test_cli_publisher_busy_fallback_preserves_attention(monkeypatch, tail, expe
     monkeypatch.setattr(probe, 'capture', lambda _: tail)
     monkeypatch.setattr(probe, 'metadata', lambda *_: {'cli_status': 'busy'})
     monkeypatch.setattr(probe, 'transcript_path', lambda *_: None)
+    assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
+
+
+@pytest.mark.parametrize('event', ['prompt', 'tool', 'compact'])
+@pytest.mark.parametrize('publisher_time,expected', [(41, 'working'), (42, 'working'),
+                                                    (43, 'idle'), (None, 'working')])
+def test_newer_exact_publisher_idle_supersedes_stale_work_hook(monkeypatch, event, publisher_time, expected):
+    pane = {field: '' for field in probe.FIELDS}
+    pane.update(generation='server', pane_id='%121', pane_pid='100',
+                session_created='123', pane_current_path='/workspace', session_name='toy')
+    tail = ('  104\n  ⎿ Interrupted · What should Claude do instead?\n\n'
+            '● How is Claude doing this session? (optional)\n'
+            '  1: Bad    2: Fine   3: Good   0: Dismiss\n')
+    monkeypatch.setattr(probe, 'capture', lambda _: tail)
+    monkeypatch.setattr(probe, 'metadata', lambda *_: {'event': event, 'ts': 42,
+                         'cli_status': 'idle', 'cli_status_ts': publisher_time})
+    assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
+
+
+@pytest.mark.parametrize('tail,expected', [(SINGLE, 'waiting'),
+    ('Do you want to proceed?\n', 'waiting'), ('✻ Working…\n', 'working')])
+def test_publisher_idle_never_overrides_live_work_or_attention(monkeypatch, tail, expected):
+    pane = {field: '' for field in probe.FIELDS}
+    pane.update(generation='server', pane_id='%121', pane_pid='100',
+                session_created='123', pane_current_path='/workspace', session_name='toy')
+    monkeypatch.setattr(probe, 'capture', lambda _: tail)
+    monkeypatch.setattr(probe, 'metadata', lambda *_: {'event': 'prompt', 'ts': 42,
+                         'cli_status': 'idle', 'cli_status_ts': 43})
     assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
 
 

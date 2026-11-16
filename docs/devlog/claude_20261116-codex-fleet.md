@@ -93,6 +93,24 @@ returned HTTP 200. Auth took 0.008–0.124s; native detail 0.012–0.837s; remot
 reconnected; earlier bridge IDs also underwent explicit archive/recreation, so
 record preservation must not be misreported as all old bridges remaining online.
 
+## Interrupted-session status
+
+A real ACP Stop reached an isolated Claude process and its transcript recorded
+interruption, but HQ still reported working: an older prompt hook overrode the
+existing publisher's newer idle transition. The probe now carries the verified
+publisher timestamp and lets strictly newer idle supersede only that stale work
+hook fallback. Equal, older or absent timestamps retain working; live spinner,
+question and permission detection retain priority. PID, birth, domain and exact
+pane/window checks are unchanged. A read-only candidate probe on the already
+interrupted process returned idle without sending another input.
+
+The 0.9.2 source passes 490 Python tests, including timestamp ordering,
+publisher identity rejection, busy/menu priority and metadata propagation.
+The affected existing owner now returns idle through the root API for the same
+already-interrupted UUID and process birth, without another Stop. Its activation
+preserved all 15 protected processes, ten panes and thirteen live routes.
+The remaining owners are being aligned to this immutable release.
+
 ## Validation and live-test boundary
 
 The final 0.9.1 source passes 474 Python tests. The browser contract suite passes

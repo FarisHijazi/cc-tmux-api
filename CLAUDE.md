@@ -50,3 +50,5 @@ require exact process birth/domain and tmux window/pane before trusting it.
 Darwin publisher birth markers use UTC and space-padded days, unlike the parsed
 process inventory; keep that canonical conversion when comparing markers.
 Profile discovery is shared with `rc_watchdog`; no additional poller owns status.
+A verified publisher idle timestamp may supersede a strictly older work hook;
+current spinner/menu detection and exact process/pane checks always retain priority.
