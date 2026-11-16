@@ -38,8 +38,9 @@ def one(history, value):
     return history.observe(value)["sessions"][0]
 
 
-def test_native_disconnect_and_restart_do_not_imply_end(history, clock):
-    row = session(transport='native', lifecycle='alive', native_control={'request_id': 'p1'})
+@pytest.mark.parametrize("transport", ["native", "codex"])
+def test_native_disconnect_and_restart_do_not_imply_end(history, clock, transport):
+    row = session(transport=transport, lifecycle='alive', native_control={'request_id': 'p1'})
     one(history, snapshot([row]))
     clock[0] = 1100
     disconnected = one(history, snapshot([dict(row, lifecycle='unreachable')]))

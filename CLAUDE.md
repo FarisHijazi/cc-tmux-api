@@ -6,6 +6,12 @@ Native Remote Control protocol research and live evidence are recorded in
 These are deliberately plain links, not automatic includes.
 For runtime launch/configuration, use [README.md](README.md#native-remote-control)
 and preserve the existing production service and HTTPS owners.
+`codex_remote.py` owns the existing Codex app-server connection. `fleet.py` routes
+its `@codex` source through the same locks, receipts and peer federation; do not
+add a second tmux writer or infer Codex identity from a working directory.
+`SessionHistory` retains unloaded or disconnected Codex threads as unreachable,
+not ended. The Rust deployment needs equivalent integration or an explicit
+same-owner cutover; changing the Python fleet alone does not update it.
 Native launch keys are private runtime files; never place their values in docs.
 Computer-use protocol support, deployed consent tests and account/OS limits are recorded
 in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).
