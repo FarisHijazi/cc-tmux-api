@@ -54,6 +54,7 @@ def _row(s: dict) -> dict:
         "lifecycle": s.get("lifecycle"),
         "online": s.get("online"),
         "transport": s.get("transport", "tmux"),
+        "provider": s.get("provider", "claude"),
     }
 
 
@@ -97,7 +98,7 @@ def build(http_factory=client, **server_options) -> MCPServer:
 
     @mcp.tool()
     def list_sessions(query: str = "", host: str = "", include_ended: bool = False) -> list[dict]:
-        """List Claude Code sessions on every machine the HQ federates.
+        """List Claude Code and loaded Codex sessions on every machine the HQ federates.
 
         query filters on title, tmux session name and folder (case-insensitive);
         host filters on the machine label, e.g. "Dev" or "Work".
@@ -119,7 +120,8 @@ def build(http_factory=client, **server_options) -> MCPServer:
         with http_factory() as http:
             detail = _get(http, f"/api/sessions/{quote(session_id, safe='')}")
         messages = [
-            {"role": m.get("role"), "text": (m.get("text") or "")[-MESSAGE_CHARS:]}
+            {**({"id": m["id"]} if m.get("id") else {}),
+             "role": m.get("role"), "text": (m.get("text") or "")[-MESSAGE_CHARS:]}
             for m in (detail.get("messages") or [])[-max(1, last_messages):]
         ]
         return {**_row(detail), "revision": detail["revision"], "question": detail.get("menu"),

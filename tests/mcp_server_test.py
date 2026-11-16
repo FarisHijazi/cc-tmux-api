@@ -4,9 +4,9 @@ import json
 
 import httpx
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from cc_tmux_api import mcp_server
-from mcp.server.mcpserver.exceptions import ToolError
 
 SESSIONS = [
     {"id": "a", "host": "dev", "host_label": "Dev", "session": "ai-course", "title": "✳ ai course",
@@ -62,6 +62,22 @@ def test_read_session_shows_question_and_messages(hq):
     detail = call(server, "read_session", session_id="b")
     assert detail["waiting_on_question"] and detail["question"] == {"options": ["Yes", "No"]}
     assert detail["messages"] == [{"role": "user", "text": "hi"}]
+
+
+def test_codex_discovery_preserves_provider_controls_and_source_message_ids():
+    row = {**SESSIONS[0], "provider": "codex", "transport": "codex",
+           "native_control": {"request_id": "approval-1", "tool_name": "Command"},
+           "messages": [{"id": "native-item-1", "role": "assistant", "text": "Ready"}],
+           "capabilities": {"send": False, "respond": True}}
+    def handler(request):
+        return httpx.Response(200, json={"sessions": [row]} if request.url.path == "/api/sessions" else row)
+    server = mcp_server.build(lambda: httpx.Client(base_url="http://hq", transport=httpx.MockTransport(handler)))
+    assert call(server, "list_sessions")[0]["provider"] == "codex"
+    detail = call(server, "read_session", session_id="a")
+    assert detail["transport"] == "codex"
+    assert detail["messages"] == row["messages"]
+    assert detail["capabilities"] == row["capabilities"]
+    assert detail["native_control"] == row["native_control"]
 
 
 def test_send_message_posts_with_current_revision_and_fresh_request_id(hq):

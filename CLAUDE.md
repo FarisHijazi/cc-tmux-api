@@ -12,6 +12,12 @@ add a second tmux writer or infer Codex identity from a working directory.
 `SessionHistory` retains unloaded or disconnected Codex threads as unreachable,
 not ended. The Rust deployment needs equivalent integration or an explicit
 same-owner cutover; changing the Python fleet alone does not update it.
+Tests disable automatic Codex discovery in `tests/conftest.py`; protocol tests
+must supply isolated sockets or fakes before explicitly enabling it.
+Codex runtime settings are in `README.md#existing-codex-sessions`; rollout and
+version compatibility evidence is in `docs/devlog/claude_20261116-codex-fleet.md`.
+The UI shares native control rendering but respects per-action capabilities;
+Claude Remote Control links and model settings remain capability-gated.
 Native launch keys are private runtime files; never place their values in docs.
 Computer-use protocol support, deployed consent tests and account/OS limits are recorded
 in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).

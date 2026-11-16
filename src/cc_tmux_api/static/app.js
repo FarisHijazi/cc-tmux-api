@@ -203,12 +203,12 @@ function toolSummary(m) {
   const value = input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || input.prompt || '';
   return String(value).split('\n')[0].slice(0, 160);
 }
-function Message({ m }) {
+function Message({ m, provider = 'Claude' }) {
   if (m.role === 'tool') return html`<details class=${`tool-call${m.is_error ? ' failed' : m.done ? '' : ' running'}`}><summary><span class="tool-name">${m.name}</span><span class="tool-arg" dir="auto">${toolSummary(m)}</span><span class="tool-state">${m.is_error ? 'Error' : m.done ? '' : 'Running…'}</span></summary><pre class="tool-io">${m.input}</pre>${m.done && html`<pre class="tool-io">${m.text || 'No output.'}</pre>`}</details>`;
   if (m.role === 'thinking') return html`<details class="thinking"><summary>Thinking</summary><${MessageText} text=${m.text}/></details>`;
   if (m.role === 'command') return html`<div class="command-line"><code dir="auto">${m.text}</code></div>`;
   if (m.role === 'system') return html`<div class="system-note" dir="auto">${m.text}</div>`;
-  return html`<article class=${`message ${m.role}`}><div class="message-author">${m.role === 'user' ? 'You' : 'Claude'}</div><${MessageText} text=${m.text}/></article>`;
+  return html`<article class=${`message ${m.role}`}><div class="message-author">${m.role === 'user' ? 'You' : provider}</div><${MessageText} text=${m.text}/></article>`;
 }
 // Suggestions only: any model the session's launcher can route may be typed.
 const MODEL_CHOICES = ['opus', 'sonnet', 'haiku', 'fable', 'gpt-5.6-sol'];
@@ -241,7 +241,7 @@ function SlashMenu({ draft, commands, pick }) {
   return found.length ? html`<div class="slash-menu" role="listbox" aria-label="Slash commands">${found.map(c => html`<button type="button" role="option" onClick=${() => pick(`/${c} `)}>/${c}</button>`)}</div>` : null;
 }
 function TranscriptEmpty({ session, openTerminal }) {
-  if (session.transport === 'native') return html`<${Empty} title="No conversation messages yet" icon="terminal">Messages will appear when this session sends them.<//>`;
+  if (['native', 'codex'].includes(session.transport)) return html`<${Empty} title="No conversation messages yet" icon="terminal">Messages will appear when this session sends them.<//>`;
   const reason = {
     identity_missing: 'HQ couldn’t identify the exact Claude conversation for this session.',
     file_missing: 'Claude hasn’t saved a conversation file for this session.',
@@ -362,7 +362,8 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   // carries authoritative lifecycle; never keep showing cached Alive controls.
   const observed = snapshot && ['ended','unreachable'].includes(lifecycle(snapshot)) ? {...resource.data,...snapshot} : resource.data || snapshot;
   const s = observed ? {...observed, messages:observed.messages?.length ? observed.messages : history.current.messages, tail:observed.tail || history.current.tail} : null;
-  const native = s?.transport === 'native';
+  const native = ['native', 'codex'].includes(s?.transport);
+  const provider = s?.transport === 'codex' ? 'Codex' : 'Claude';
   const pending = native ? !!s?.native_control : !!s?.menu;
   const streaming = native && canControl(s) ? s?.streaming : null;
   useEffect(() => setFast(native && canControl(s) && (s?.status === 'working' || !!streaming)), [native, s?.status, s?.lifecycle, !!streaming]);
@@ -409,7 +410,7 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
   const disabled = busy || !resource.data || !canControl(s) || !s || s.revision == null || !!resource.error || !navigator.onLine;
   const key = value => act('key', { key: value });
   const submit = () => {
-    if (!draft.trim() || pending) return;
+    if (!draft.trim() || pending || s?.capabilities?.send === false) return;
     const model = native && s?.capabilities?.set_model && /^\/model\s+(\S+)\s*$/.exec(draft);
     if (model) act('set_model', { text: model[1], fromDraft: true });
     else act('send', { text: draft });
@@ -422,13 +423,13 @@ function Detail({ id, snapshot, back, refreshList, muted, toggleMute }) {
     <div class="detail-tabs" role="tablist" aria-label="Session view">${(native ? ['conversation'] : ['conversation','terminal']).map(t => html`<button role="tab" id=${`tab-${t}`} aria-selected=${native || tab === t} aria-controls="session-panel" class=${native || tab === t ? 'active' : ''} onClick=${() => setTab(t)}>${t === 'conversation' ? 'Conversation' : 'Terminal'}</button>`)}</div>
     <${ErrorNotice} message=${resource.error} retry=${resource.reload}/><${ErrorNotice} message=${actionError}/>
     <div class="transcript" id="session-panel" role="tabpanel" aria-labelledby=${`tab-${tab}`} ref=${transcript} onScroll=${e => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100; }}>
-      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<${Message} key=${m.id || i} m=${m}/>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
-      ${streaming && html`<article class="message assistant streaming" aria-live="polite"><div class="message-author">Claude</div><${MessageText} text=${streaming}/></article>`}
-      ${native && s?.native_control && canControl(s) && html`<${NativeControl} key=${s.native_control.request_id} id=${id} control=${s.native_control} disabled=${disabled} act=${act}/>`}
+      ${!resource.hasLoaded ? html`<${Loading} label="Opening session"/>` : s && !native && tab === 'terminal' ? html`<pre class="terminal-output">${s.tail || (canControl(s) ? 'No terminal output is available yet.' : 'No last known terminal output is available.')}</pre>` : s && html`<div class="messages">${s.messages?.length ? s.messages.map((m, i) => html`<${Message} key=${m.id || i} m=${m} provider=${provider}/>`) : html`<${TranscriptEmpty} session=${s} openTerminal=${() => setTab('terminal')}/>`}</div>`}
+      ${streaming && html`<article class="message assistant streaming" aria-live="polite"><div class="message-author">${provider}</div><${MessageText} text=${streaming}/></article>`}
+      ${native && s?.native_control && canControl(s) && html`<${NativeControl} key=${s.native_control.request_id} id=${id} control=${s.native_control} disabled=${disabled || s.capabilities?.respond === false} act=${act}/>`}
       ${!native && s?.menu && canControl(s) && html`<${Question} key=${s.menu.question + s.menu.kind} id=${id} menu=${s.menu} tail=${s.tail} disabled=${disabled} act=${act}/>`}
     </div>
-    <div class="detail-bottom">${s && !canControl(s) ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`<div>${native ? html`<div class="native-actions"><${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => act('interrupt')}/></div>` : html`<details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>`}
-    ${pending && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${pending && !draftOpen}>${native && html`<${SlashMenu} draft=${draft} commands=${s?.slash_commands} pick=${value => { setDraft(value); setSaved(saveDraft(id, value)); document.getElementById('reply')?.focus(); }}/>`}<form class="composer" onSubmit=${e => { e.preventDefault(); submit(); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : 'Message this session…'} onKeyDown=${e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : pending ? 'Use the request controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
+    <div class="detail-bottom">${s && !canControl(s) ? html`<p class="read-only-note">Read-only${draft ? ' · Your message draft is saved on this device.' : ''}</p>` : html`<div>${native ? html`<div class="native-actions"><${ArmedButton} label="Interrupt" disabled=${disabled || s?.capabilities?.interrupt === false} onFire=${() => act('interrupt')}/></div>` : html`<details class="controls" open=${tab === 'terminal'}><summary>Keyboard controls</summary><div class="key-row">${[['Up','↑'],['Down','↓'],['Left','←'],['Right','→'],['Space','Space'],['Enter','Enter'],['Escape','Esc'],['Tab','Tab']].map(([value,label]) => html`<button disabled=${disabled} aria-label=${value} onClick=${() => key(value)}>${label}</button>`)}<${ArmedButton} label="Interrupt" disabled=${disabled} onFire=${() => key('C-c')}/></div></details>`}
+    ${pending && html`<button class="draft-toggle" aria-expanded=${draftOpen} aria-controls="session-composer" onClick=${() => setDraftOpen(open => !open)}>${draftOpen ? 'Hide draft' : 'Draft a message'}${draft && html`<span>Saved</span>`}</button>`}<div id="session-composer" hidden=${pending && !draftOpen}>${native && html`<${SlashMenu} draft=${draft} commands=${s?.slash_commands} pick=${value => { setDraft(value); setSaved(saveDraft(id, value)); document.getElementById('reply')?.focus(); }}/>`}<form class="composer" onSubmit=${e => { e.preventDefault(); submit(); }}><label class="sr-only" for="reply">Message this session</label><textarea id="reply" rows="2" value=${draft} placeholder=${pending ? 'Draft a message for after this request…' : 'Message this session…'} onKeyDown=${e => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submit(); } }} onInput=${e => { setDraft(e.target.value); setSaved(saveDraft(id, e.target.value)); }}/><button class="primary send-button" type="submit" aria-label="Send message" disabled=${disabled || !draft.trim() || pending || s?.capabilities?.send === false}><${Icon} name="arrow"/></button></form><div class="composer-meta" role="status">${busy ? 'Sending…' : pending ? 'Use the request controls above. Your draft stays here.' : notice || (draft ? saved ? 'Draft saved on this device' : 'Draft could not be saved on this device' : 'Sends directly to the live session')}</div></div></div>`}</div>
   </section>`;
 }
 function ArmedButton({ label, onFire, disabled = false }) {

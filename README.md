@@ -1,6 +1,6 @@
 # cc-tmux-api
 
-HQ for native Remote Control and existing [Claude Code](https://code.claude.com) tmux sessions: discover,
+HQ for native Remote Control, loaded Codex threads and existing [Claude Code](https://code.claude.com) tmux sessions: discover,
 read conversations, answer questions, and operate unattended workers and routines.
 Run the same application on each machine. Configured HQ peers aggregate downstream
 sessions and forward reads and guarded writes through a cascade to the owning
@@ -87,6 +87,29 @@ state is private under `CC_TMUX_STATE_DIR/native`; lifecycle summaries continue
 to belong to the shared session-history store.
 
 See [protocol research, tests and deployment evidence](docs/devlog/claude_20261018-native-remote-control.md).
+
+### Existing Codex sessions
+
+HQ detects the existing local Codex app-server control socket at
+`$CODEX_HOME/app-server-control/app-server-control.sock` (default `~/.codex`).
+`CC_TMUX_CODEX_SOCKET` selects an existing socket; `CC_TMUX_CODEX=0` disables this
+source. Each existing HQ owner discovers its own currently loaded thread UUIDs
+and federates them through the same peer routes. No new Codex daemon, terminal
+scanner or history writer is started. An unloaded thread is unreachable, not
+proof that its conversation ended.
+
+The adapter connects through the official app-server WebSocket protocol and
+rejoins an independently verified loaded UUID without changing its model,
+directory, sandbox or approval policy. Native history keeps source message IDs
+and is bounded to 400 messages / 2 MB; `history_truncated` reports the bound.
+Send, steer, interrupt and one-time command/file/permission approvals or questions
+use the existing fleet locks, revisions and receipts. Unknown dialogs remain in
+the original client, and uncertain delivery is never automatically repeated.
+Capabilities from the existing thread control the available HQ actions.
+
+Codex sessions also flow through the same cc-proxy MCP and ACP integrations;
+they require no separate connector or T3 provider configuration. Deployment and
+compatibility evidence is recorded in `docs/devlog/claude_20261116-codex-fleet.md`.
 
 ### Mirroring native sessions to claude.ai
 
