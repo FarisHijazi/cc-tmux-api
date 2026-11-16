@@ -217,7 +217,7 @@ class NativeRemote:
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w") as out:
-            json.dump({"version": 1, "sessions": self._sessions}, out)
+            out.write(json.dumps({"version": 1, "sessions": self._sessions}))
         os.replace(temporary, self._path)
 
     def _get(self, sid):

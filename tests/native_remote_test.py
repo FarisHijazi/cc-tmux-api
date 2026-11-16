@@ -12,6 +12,31 @@ from cc_tmux_api.fleet import FleetError
 from cc_tmux_api.native_remote import MAX_EVENTS, NativeRemote, _frame, get_backend
 
 
+def test_registry_save_preserves_exact_format_and_atomic_private_replacement(tmp_path, monkeypatch):
+    import os
+
+    backend = NativeRemote(tmp_path, "test-" + "x" * 40)
+    backend._sessions = {"test-session": {"text": "Unicode: مرحبا", "events": [1, None, True]}}
+    previous = '{"version": 1, "sessions": {}}'
+    backend._path.write_text(previous)
+    expected = json.dumps({"version": 1, "sessions": backend._sessions})
+    replace = os.replace
+    replacements = []
+
+    def verify_atomic(source, destination):
+        assert backend._path.read_text() == previous
+        assert source.read_text() == expected
+        assert source.stat().st_mode & 0o777 == 0o600
+        replacements.append((source, destination))
+        replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", verify_atomic)
+    backend._save()
+    assert replacements == [(backend._path.with_suffix(".tmp"), backend._path)]
+    assert backend._path.read_text() == expected
+    assert backend._path.stat().st_mode & 0o777 == 0o600
+
+
 def computer_use_request(request_id="computer-consent"):
     return {
         "type": "control_request",
