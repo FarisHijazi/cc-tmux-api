@@ -22,8 +22,8 @@ process, session writer, permanent service, tunnel or T3 fork was added.
 
 ## Current deployment
 
-All six HQ owners and the existing public MCP adapter run 0.9.1, wheel SHA-256
-`e7f01b4399001f9abaf0fce61fd08bb38cb16ab0fa8189705008ac716a606b94`.
+All six HQ owners and the existing public MCP adapter run 0.9.2, wheel SHA-256
+`4bc9b37f7281a4d100f32a7044005514f95e67df39ec1db25bb5feb734f9969f`.
 Releases live at `~/.local/share/cc-tmux-api/releases/<sha>/`. Private config,
 native state, session history, push keys, wrappers and listeners are retained.
 Older environments were copied before installing the wheel; dependency checks
@@ -31,17 +31,17 @@ passed. No preceding environment was modified.
 
 | Node | Existing owner | Activated HQ PID | Preserved panes |
 | --- | --- | ---: | ---: |
-| Dev | `cc-tmux-hq.service` | 4048047 | 10 |
-| Second domain VM | Existing domain unit (release manifest) | 1899455 | 10 |
-| First domain VM | Existing domain unit (release manifest) | 848493 | 3 |
-| Sahalat | `cc-tmux-api.service` | 1677372 | 0 |
-| Ftower | `cc-tmux-hq.service` | 4052482 | 0 |
-| Mac | `com.local.cc-tmux-hq` | 26081 | 33 |
+| Dev | `cc-tmux-hq.service` | 116015 | 10 |
+| Second domain VM | Existing domain unit (release manifest) | 2190032 | 10 |
+| First domain VM | Existing domain unit (release manifest) | 933642 | 3 |
+| Sahalat | `cc-tmux-api.service` | 1683288 | 0 |
+| Ftower | `cc-tmux-hq.service` | 4076127 | 0 |
+| Mac | `com.local.cc-tmux-hq` | 71060 | 33 |
 
 Each activation compared every existing Claude/Codex/tmux PID and process birth,
 pane/server identity and live non-native route. All survived. All VM units retain
 `KillMode=process`; this is essential because a preexisting tmux server can belong
-to an HQ cgroup. User sessions were never restarted. The first root census briefly
+to an HQ cgroup. User sessions were never restarted. During the preceding deployment, the first root census briefly
 missed one peer; the same running owner recovered with all 34 preceding live
 non-native routes, without a network or service change. The earlier Mac activation
 hit its health deadline and restored the old owner; its retry passed unchanged.
@@ -58,7 +58,7 @@ implementation or service was introduced.
 Remote release evidence: `codex-stage.json`, private `before.json`,
 `state-backup/`, `service-override-before.conf`, and `codex-deployed.json`.
 Mac evidence: `deployment.json` and `launchagent-before.plist`.
-The existing MCP adapter is PID 4057286; `mcp-service-before.service` and
+The existing MCP adapter is PID 4076465; `mcp-service-before.service` and
 `mcp-deployed.json` prove its only unit change was ExecStart. Authenticated public
 discovery succeeded; anonymous and invalid bearer requests returned 401.
 
@@ -85,10 +85,10 @@ Native request handlers and every SSE registry-lock operation now run off the
 HTTP event loop, separately from FastAPI's request pool. Stream registration and
 shielded cleanup preserve epoch/lease checks even if setup is cancelled.
 
-After rollout, three rounds each ran five concurrent reads: auth, native Claude
+After the final 0.9.2 rollout, three rounds each ran five concurrent reads: auth, native Claude
 detail, two reads of the same remote Claude detail, and a fleet snapshot. All 15
-returned HTTP 200. Auth took 0.008–0.124s; native detail 0.012–0.837s; remote detail
-0.586–1.519s; snapshots 0.744–4.119s. No peer was unavailable. Evidence is
+returned HTTP 200. Auth took 0.010–0.247s; native detail 0.026–2.057s; remote detail
+0.416–0.791s; snapshots 0.320–5.446s. No peer was unavailable. Evidence is
 `concurrent-read-validation.json` in the root release. Native stream leases
 reconnected; earlier bridge IDs also underwent explicit archive/recreation, so
 record preservation must not be misreported as all old bridges remaining online.
@@ -109,11 +109,14 @@ publisher identity rejection, busy/menu priority and metadata propagation.
 The affected existing owner now returns idle through the root API for the same
 already-interrupted UUID and process birth, without another Stop. Its activation
 preserved all 15 protected processes, ten panes and thirteen live routes.
-The remaining owners are being aligned to this immutable release.
+Every existing owner and the MCP adapter now use that same immutable release.
+All four reserved toy details returned idle/alive after activation; public
+authenticated MCP discovery returned 41 routes and both anonymous and invalid
+bearer calls returned 401. No second interrupt was sent to prove the status fix.
 
 ## Validation and live-test boundary
 
-The final 0.9.1 source passes 474 Python tests. The browser contract suite passes
+The final 0.9.2 source passes 490 Python tests. The browser contract suite passes
 at 390px and 1440px with Codex capability, label, permission and semantic-interrupt
 checks. Mocked browser/protocol tests do not establish live approval delivery.
 
@@ -127,6 +130,6 @@ second domain dashboard returned HTTP 200 from both Mac and Dev.
 All four reserved Claude/Codex toy details were read through their exact root
 routes with unchanged workdirs and identities, then handed to the ACP test owner.
 The final private fixture manifest is
-`~/.codex/tmp/fleet-mcp/codex-fixture-manifest-091-20261116.json` on the operator Mac.
+`~/.codex/tmp/fleet-mcp/codex-fixture-manifest-092-20261116.json` on the operator Mac.
 Continuation, reload, interrupt and approval E2E results belong to the cc-proxy
 integration report; readiness and preserved identities alone do not prove them.

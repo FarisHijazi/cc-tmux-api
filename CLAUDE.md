@@ -18,7 +18,7 @@ Codex runtime settings are in `README.md#existing-codex-sessions`; rollout and
 version compatibility evidence is in `docs/devlog/claude_20261116-codex-fleet.md`.
 The UI shares native control rendering but respects per-action capabilities;
 Claude Remote Control links and model settings remain capability-gated.
-All six existing HQ owners and the public MCP adapter run the 0.9.1 wheel recorded in the Codex devlog;
+All six existing HQ owners and the public MCP adapter run the 0.9.2 wheel recorded in the Codex devlog;
 Dev now uses the same Python owner after explicit Rust API/state parity.
 Native launch keys are private runtime files; never place their values in docs.
 Native registry routes and SSE lock access run off the HTTP event loop and outside
