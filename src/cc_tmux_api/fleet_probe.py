@@ -295,7 +295,7 @@ def process_marker(proc):
 
 
 def cli_activity(pane, proc):
-    """Read only this process's existing Claude publisher record; never infer identity from it."""
+    """Read the current UUID/activity from this exact process's existing publisher."""
     if not pane.get('window_id'):
         return None
     try:
@@ -305,7 +305,7 @@ def cli_activity(pane, proc):
     marker, domain = process_marker(proc)
     if not marker:
         return None
-    statuses = {}
+    statuses, sessions = {}, set()
     route = f":{pane['window_id']}.{pane['pane_id']}"
     for root in claude_config_dirs():
         path = root / 'sessions' / f"{proc['pid']}.json"
@@ -323,19 +323,28 @@ def cli_activity(pane, proc):
             if data.get('status') in ('busy', 'idle'):
                 status = data['status']
                 statuses[status] = max(statuses.get(status, 0), data['statusUpdatedAt'] / 1000)
+            sid = uuid_value(data.get('sessionId'))
+            if sid:
+                sessions.add(sid)
         except (OSError, ValueError, TypeError):
             continue
+    if len(statuses) > 1 or len(sessions) > 1:
+        return None
+    result = {}
     if len(statuses) == 1:
         status, updated_at = next(iter(statuses.items()))
-        return {'status': status, 'updated_at': updated_at}
-    return None
+        result.update(status=status, updated_at=updated_at)
+    if sessions:
+        result['sid'] = sessions.pop()
+    return result or None
 
 
 def metadata(pane, proc):
     activity = cli_activity(pane, proc)
     publisher = ({'cli_status': activity['status'], 'cli_status_ts': activity['updated_at']}
-                 if activity else {})
-    sid = argv_sid(proc)
+                 if activity and 'status' in activity else {})
+    # In-process resume changes the publisher UUID while argv keeps launch intent.
+    sid = (activity or {}).get('sid') or argv_sid(proc)
     exact = f"{pane['session_name']}:{pane['window_index']}.{pane['pane_index']}"
     events = []
     for name in ('cc-events.jsonl.1', 'cc-events.jsonl'):

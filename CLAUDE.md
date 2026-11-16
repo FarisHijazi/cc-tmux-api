@@ -47,8 +47,12 @@ The fleet foreground discovery backports, guarded working-input control and
 tmux-preserving service overrides are recorded in `docs/devlog/claude_20261115-fleet-coverage.md`.
 Transcript messages retain source IDs (row UUID, otherwise provider message ID;
 text blocks suffix their original index). Keep this in the existing probe reader.
-The probe reads Claude's existing per-process publisher for hookless busy status;
-require exact process birth/domain and tmux window/pane before trusting it.
+The probe reads Claude's existing per-process publisher for hookless busy status
+and the current runtime UUID; require exact process birth/domain and tmux
+window/pane before trusting it. An in-process resume changes that UUID while argv
+retains launch intent, so the validated publisher takes precedence over argv.
+Identity is independent of activity: waiting/shell publishers still identify the
+conversation. Conflicting profiles are rejected; no cwd/title inference is used.
 Darwin publisher birth markers use UTC and space-padded days, unlike the parsed
 process inventory; keep that canonical conversion when comparing markers.
 Profile discovery is shared with `rc_watchdog`; no additional poller owns status.

@@ -793,15 +793,15 @@ def cli_publisher(tmp_path, monkeypatch):
     return pane, proc, publish, epoch
 
 
-def test_cli_publisher_tracks_busy_then_idle_without_adopting_session_identity(cli_publisher):
+def test_cli_publisher_tracks_current_identity_and_activity(cli_publisher):
     pane, proc, publish, epoch = cli_publisher
     publish(sessionId=OTHER)
-    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'busy', 'updated_at': epoch + 2}
+    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'busy', 'updated_at': epoch + 2, 'sid': OTHER}
     publish(status='idle', sessionId=OTHER)
-    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'idle', 'updated_at': epoch + 2}
+    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'idle', 'updated_at': epoch + 2, 'sid': OTHER}
 
 
-def test_metadata_preserves_verified_publisher_time_without_guessing_identity(cli_publisher, monkeypatch):
+def test_metadata_preserves_verified_publisher_identity_and_time(cli_publisher, monkeypatch, tmp_path):
     pane, proc, publish, epoch = cli_publisher
     pane.update(session_name='toy', window_index='0', pane_index='0')
     publish(status='idle', sessionId=OTHER)
@@ -809,7 +809,67 @@ def test_metadata_preserves_verified_publisher_time_without_guessing_identity(cl
     monkeypatch.setattr(probe, 'argv_sid', lambda _: None)
     monkeypatch.setattr(probe, 'route_sid', lambda *_: None)
     monkeypatch.setattr(probe, 'json_lines', lambda _: [])
-    assert probe.metadata(pane, proc) == {'cli_status': 'idle', 'cli_status_ts': epoch + 2}
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc) == {'sid': OTHER, 'cli_status': 'idle', 'cli_status_ts': epoch + 2}
+
+
+@pytest.mark.parametrize('status', ['busy', 'idle', 'waiting', 'shell'])
+def test_runtime_publisher_uuid_supersedes_launch_uuid(cli_publisher, monkeypatch, tmp_path, status):
+    pane, proc, publish, _ = cli_publisher
+    pane.update(session_name='renamed-session', window_index='0', pane_index='0')
+    proc.update(args=f'claude --session-id {SID}', nested=True)
+    publish(sessionId=OTHER, status=status)
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    folder = tmp_path / '.claude/projects/-workspace'
+    folder.mkdir(parents=True)
+    (folder / f'{SID}.jsonl').write_text(json.dumps({'type': 'last-prompt', 'sessionId': SID}))
+    (folder / f'{OTHER}.jsonl').write_text(json.dumps({
+        'type': 'assistant', 'sessionId': OTHER, 'uuid': 'reply',
+        'message': {'content': [{'type': 'text', 'text': 'Current conversation'}]},
+    }))
+    meta = probe.metadata(pane, proc)
+    assert meta['sid'] == OTHER
+    assert probe.transcript_messages(meta, '/workspace') == [
+        {'role': 'assistant', 'text': 'Current conversation', 'id': 'reply:0'},
+    ]
+
+
+def test_cli_publisher_rejects_conflicting_runtime_uuids(cli_publisher, tmp_path, monkeypatch):
+    pane, proc, publish, _ = cli_publisher
+    path = publish(sessionId=SID)
+    second = tmp_path / 'other'
+    (second / 'sessions').mkdir(parents=True)
+    (second / 'sessions/101.json').write_text(path.read_text().replace(SID, OTHER))
+    monkeypatch.setattr(probe, 'claude_config_dirs', lambda: [tmp_path, second])
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+def test_invalid_publisher_uuid_preserves_argv_identity(cli_publisher, monkeypatch, tmp_path):
+    pane, proc, publish, _ = cli_publisher
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    proc.update(args=f'claude --session-id {SID}')
+    publish(sessionId='not-a-uuid')
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc)['sid'] == SID
+
+
+@pytest.mark.parametrize('changes', [
+    {'pid': 102}, {'procStart': 'reused-pid'}, {'pidDomain': 'other-host'},
+    {'tmux': 'toy:@8.%121'}, {'tmux': 'toy:@7.%122'}, {'startedAt': 0},
+])
+def test_invalid_runtime_publisher_preserves_argv_identity(cli_publisher, monkeypatch, tmp_path, changes):
+    pane, proc, publish, _ = cli_publisher
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    proc.update(args=f'claude --session-id {SID}')
+    publish(sessionId=OTHER, **changes)
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc)['sid'] == SID
 
 
 @pytest.mark.parametrize('changes', [
