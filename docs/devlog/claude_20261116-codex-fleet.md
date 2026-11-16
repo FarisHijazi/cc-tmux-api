@@ -22,8 +22,8 @@ process, session writer, permanent service, tunnel or T3 fork was added.
 
 ## Current deployment
 
-All six HQ owners and the existing public MCP adapter run 0.9.3, wheel SHA-256
-`525f8b458283d2c66d6d5ca1b9a10031fd6d3155564b13d131312def6a0e51fe`.
+All six HQ owners and the existing public MCP adapter run 0.9.4, wheel SHA-256
+`105358e29e493b4ac94e0d3a7f756c39f3eae6a6d77133946e464f443089be17`.
 Releases live at `~/.local/share/cc-tmux-api/releases/<sha>/`. Private config,
 native state, session history, push keys, wrappers and listeners are retained.
 Older environments were copied before installing the wheel; dependency checks
@@ -31,12 +31,12 @@ passed. No preceding environment was modified.
 
 | Node | Existing owner | Activated HQ PID | Preserved panes |
 | --- | --- | ---: | ---: |
-| Dev | `cc-tmux-hq.service` | 413182 | 10 |
-| Second domain VM | Existing domain unit (release manifest) | 2676155 | 10 |
-| First domain VM | Existing domain unit (release manifest) | 1048490 | 2 |
-| Sahalat | `cc-tmux-api.service` | 1691385 | 0 |
-| Ftower | `cc-tmux-hq.service` | 4095436 | 0 |
-| Mac | `com.local.cc-tmux-hq` | 31764 | 30 |
+| Dev | `cc-tmux-hq.service` | 399487 | 9 |
+| Second domain VM | Existing domain unit (release manifest) | 1916392 | 10 |
+| First domain VM | Existing domain unit (release manifest) | 2468021 | 3 |
+| Sahalat | `cc-tmux-api.service` | 1859309 | 0 |
+| Ftower | `cc-tmux-hq.service` | 324050 | 0 |
+| Mac | `com.local.cc-tmux-hq` | 71944 | 30 |
 
 Each activation compared every existing Claude/Codex/tmux PID and process birth,
 pane/server identity and live non-native route. All survived. All VM units retain
@@ -136,7 +136,7 @@ its process and restoring verified empty input.
 
 ## Validation and live-test boundary
 
-The final 0.9.3 source passes 498 Python tests. The browser contract suite passes
+The 0.9.4 source passes 510 Python tests and scoped Ruff checks. The unchanged browser contract suite passed
 at 390px and 1440px with Codex capability, label, permission and semantic-interrupt
 checks. Mocked browser/protocol tests do not establish live approval delivery.
 
@@ -153,3 +153,28 @@ The final private fixture manifest is
 `~/.codex/tmp/fleet-mcp/codex-fixture-manifest-093-20261116.json` on the operator Mac.
 Continuation, reload, interrupt and approval E2E results belong to the cc-proxy
 integration report; readiness and preserved identities alone do not prove them.
+
+## Runtime UUID correction, 2026-11-17
+
+An in-process Claude resume can leave the launch UUID in argv while the existing
+per-process publisher reports the current conversation UUID. Six running sessions
+were affected: five returned metadata-only histories and one returned an older,
+nonempty conversation. The probe now prefers the publisher UUID only after its
+PID, process birth, PID domain and tmux window/pane match the observed process.
+Waiting and shell activity do not invalidate that identity. Conflicting profiles
+are rejected; fallback discovery retains its existing identity checks.
+
+Seven regression cases failed against the previous reader. The corrected source
+then read all 21 running Claude sessions across the three VMs with nonempty
+histories, first through a read-only probe and then through their deployed root
+HQ routes. All 21 original PID/birth pairs survived. No session received input or
+signals for this validation. The existing Linux reader units used verified
+`KillMode=process`; the public MCP reader now uses the same setting and release.
+Authenticated initialization and eight-tool listing returned 200; anonymous
+initialization returned 401. No new service or listener was introduced.
+
+Private evidence lives in the operator's `~/.codex/tmp/fleet-mcp/`:
+`vm-inventory-20261117.json`, `vm-readiness-after-094-20261117.json`,
+`runtime-uuid-live-readonly-validation-20261117.json` and each
+`codex-deploy-094-<node>.json`. UUID differences against the initial inventory
+represent the six corrected runtime identities, not replaced worker processes.
