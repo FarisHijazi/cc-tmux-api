@@ -22,8 +22,8 @@ process, session writer, permanent service, tunnel or T3 fork was added.
 
 ## Current deployment
 
-All six HQ owners and the existing public MCP adapter run 0.9.4, wheel SHA-256
-`105358e29e493b4ac94e0d3a7f756c39f3eae6a6d77133946e464f443089be17`.
+All six HQ owners and the existing public MCP adapter run 0.9.5, wheel SHA-256
+`45925b3503d12b9d6c5982df3952096cb86ab71650eea701eb789f45a5c0cbfa`.
 Releases live at `~/.local/share/cc-tmux-api/releases/<sha>/`. Private config,
 native state, session history, push keys, wrappers and listeners are retained.
 Older environments were copied before installing the wheel; dependency checks
@@ -31,15 +31,17 @@ passed. No preceding environment was modified.
 
 | Node | Existing owner | Activated HQ PID | Preserved panes |
 | --- | --- | ---: | ---: |
-| Dev | `cc-tmux-hq.service` | 399487 | 9 |
-| Second domain VM | Existing domain unit (release manifest) | 1916392 | 10 |
-| First domain VM | Existing domain unit (release manifest) | 2468021 | 3 |
-| Sahalat | `cc-tmux-api.service` | 1859309 | 0 |
-| Ftower | `cc-tmux-hq.service` | 324050 | 0 |
-| Mac | `com.local.cc-tmux-hq` | 71944 | 30 |
+| Dev | `cc-tmux-hq.service` | 775878 | 10 |
+| Second domain VM | Existing domain unit (release manifest) | 2216259 | 10 |
+| First domain VM | Existing domain unit (release manifest) | 2617098 | 3 |
+| Sahalat | `cc-tmux-api.service` | 1873597 | 0 |
+| Ftower | `cc-tmux-hq.service` | 359421 | 0 |
+| Mac | `com.local.cc-tmux-hq` | 75672 | 31 |
 
 Each activation compared every existing Claude/Codex/tmux PID and process birth,
-pane/server identity and live non-native route. All survived. All VM units retain
+pane/server identity and live non-native route. All protected processes and panes
+survived; the observed Codex unload during 0.9.5 verification is recorded below.
+All VM units retain
 `KillMode=process`; this is essential because a preexisting tmux server can belong
 to an HQ cgroup. User sessions were never restarted. Each follow-up used a fresh immediate
 baseline; user activity between upgrades changed counts without replacing any
@@ -60,8 +62,8 @@ implementation or service was introduced.
 Remote release evidence: `codex-stage.json`, private `before.json`,
 `state-backup/`, `service-override-before.conf`, and `codex-deployed.json`.
 Mac evidence: `deployment.json` and `launchagent-before.plist`.
-The existing MCP adapter is PID 4095813; `mcp-service-before.service` and
-`mcp-deployed.json` prove its only unit change was ExecStart. Authenticated public
+The existing MCP adapter is PID 362339; `mcp-service-override-before.conf` and
+`mcp-deployed.json` record its existing kill-mode protection and changed ExecStart. Authenticated public
 discovery succeeded; anonymous and invalid bearer requests returned 401.
 
 Rollback restores the preceding executable from the release manifest into the
@@ -136,7 +138,7 @@ its process and restoring verified empty input.
 
 ## Validation and live-test boundary
 
-The 0.9.4 source passes 510 Python tests and scoped Ruff checks. The unchanged browser contract suite passed
+The 0.9.5 source passes 519 Python tests and scoped Ruff checks. The unchanged browser contract suite passed
 at 390px and 1440px with Codex capability, label, permission and semantic-interrupt
 checks. Mocked browser/protocol tests do not establish live approval delivery.
 
@@ -178,3 +180,48 @@ Private evidence lives in the operator's `~/.codex/tmp/fleet-mcp/`:
 `runtime-uuid-live-readonly-validation-20261117.json` and each
 `codex-deploy-094-<node>.json`. UUID differences against the initial inventory
 represent the six corrected runtime identities, not replaced worker processes.
+
+## Live-only discovery, 2026-11-17
+
+MCP previously downloaded every retained peer session before filtering live rows.
+On the large domain owner, that transferred 614,989 bytes for 446 rows when only
+13 were live (19,603 bytes). `include_ended=false` now propagates through HQ peer
+reads and returns only live rows. Owner lifecycle observation still sees the full
+census, full history remains the HTTP default, and full/live cache entries are
+separate. A receiving HQ and MCP still filter older peers that ignore the query.
+Nine new regression cases cover query propagation, history persistence, cache
+separation and older-peer compatibility.
+
+The deployed root returned 68,358 bytes for 44 live rows versus 2,499,831 bytes
+for 1,652 full-history rows (36.6 times less data). The live read took 1.996 seconds,
+then 0.009 seconds from cache. Private authenticated MCP discovery took 0.048
+seconds versus a prior 34.42-second sample. These are measured samples, not a
+fixed latency guarantee; the network and existing cache make timings variable.
+All configured peer HQs were healthy; the empty local tmux sources on Ftower and
+Sahalat still report their preexisting missing sockets.
+The configured T3 ACP client read the canonical public MCP in 7.406 seconds;
+two complete automatic inventory passes took 7.697 and 7.896 seconds with 44
+successful import/deduplication checks each, versus earlier passes near 48 seconds.
+The existing fixture UUID, history, assistant marker and run state stayed intact.
+A generic urllib benchmark received Cloudflare 403 from both hosts; it is not
+counted as successful public verification. No authentication or WAF policy changed.
+
+The rollout preserved current process births and panes without worker input.
+Twenty of the original 21 Claude processes still matched afterwards. The old
+reply-radar routine had ended before this rollout and its existing scheduler
+created a different process/pane; that replacement is recorded separately and
+also survived activation. Existing lifecycle-management configuration was kept.
+The domain HQ still owns its task/routine namespace; the ordinary interactive
+sessions are not assigned to that lifecycle owner by T3 or fleet discovery.
+
+One Codex thread, `01a1e46a-e592-70a2-98cf-dedf2a2df9ad`, remained loaded immediately
+after its owner upgrade but later became unloaded during root verification.
+The healthy owner returned 409 `Codex thread is not loaded`; its history remains
+unreachable and its Codex process births are unchanged. The cause is unknown.
+No load, resume, input or restart was attempted on that thread.
+
+Private rollout evidence is `codex-deploy-095-<node>.json`,
+`codex-verify-095-ftower.json`, `mcp-deploy-095-ftower.json` and
+`vm-processes-after-095-20261117.json` in the operator's existing artifact directory.
+The root also stores `discovery-latency-095-before.json` and
+`discovery-latency-095-after.json` under its existing private state directory.
