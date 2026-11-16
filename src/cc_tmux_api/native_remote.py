@@ -528,7 +528,7 @@ class NativeRemote:
                 session["controls"] = dict(list(controls.items())[-64:])
             session["input_revision"] = session["revision"]
             self._save()
-            return dict(
+            receipt = dict(
                 ok=True,
                 id=raw_id,
                 request_id=request_id,
@@ -536,6 +536,9 @@ class NativeRemote:
                 sequence_num=event["sequence_num"],
                 revision=str(session["revision"]),
             )
+            if action == "send":
+                receipt["source_message_id"] = payload["uuid"]
+            return receipt
 
     @staticmethod
     def _dialog_answer(pending, response):

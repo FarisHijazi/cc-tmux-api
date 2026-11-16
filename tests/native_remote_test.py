@@ -159,6 +159,8 @@ def test_send_replay_isolation_and_interrupt(native):
     assert receipt["delivery"] == "queued"
     assert backend.replay(other, 0) == []
     events = backend.replay(sid, 0)
+    assert receipt["source_message_id"] == events[0]["payload"]["uuid"]
+    assert backend.detail(sid)["messages"][0]["id"] == receipt["source_message_id"]
     assert events[0]["payload"]["message"]["content"][0]["text"] == "Hello native"
     assert events[0]["payload"]["client_platform"] == "web_claude_ai"
     assert "inbound_origin" not in events[0]["payload"]
