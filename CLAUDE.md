@@ -25,7 +25,8 @@ Codex denial uses the request's offered negative decision: `decline`, or `cancel
 when decline is unavailable. Never widen approval or send an unoffered decision.
 The UI shares native control rendering but respects per-action capabilities;
 Claude Remote Control links and model settings remain capability-gated.
-All six existing HQ owners and the public MCP adapter run the 0.9.5 wheel recorded in the Codex devlog;
+The Mac HQ reader runs 0.9.6; the other five HQ owners and public MCP adapter remain
+on the 0.9.5 wheel, with both releases recorded in the Codex devlog;
 Dev now uses the same Python owner after explicit Rust API/state parity.
 Native launch keys are private runtime files; never place their values in docs.
 Native registry routes and SSE lock access run off the HTTP event loop and outside

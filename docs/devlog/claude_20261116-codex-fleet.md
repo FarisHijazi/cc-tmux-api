@@ -22,7 +22,9 @@ process, session writer, permanent service, tunnel or T3 fork was added.
 
 ## Current deployment
 
-All six HQ owners and the existing public MCP adapter run 0.9.5, wheel SHA-256
+The Mac HQ reader runs 0.9.6, wheel SHA-256
+`94da0c377a2ae1bd63f1f436801a922cad27f1f7d567285052d8958df3df7336`.
+The other five HQ owners and existing public MCP adapter remain on 0.9.5, wheel SHA-256
 `45925b3503d12b9d6c5982df3952096cb86ab71650eea701eb789f45a5c0cbfa`.
 Releases live at `~/.local/share/cc-tmux-api/releases/<sha>/`. Private config,
 native state, session history, push keys, wrappers and listeners are retained.
@@ -36,7 +38,7 @@ passed. No preceding environment was modified.
 | First domain VM | Existing domain unit (release manifest) | 2617098 | 3 |
 | Sahalat | `cc-tmux-api.service` | 1873597 | 0 |
 | Ftower | `cc-tmux-hq.service` | 359421 | 0 |
-| Mac | `com.local.cc-tmux-hq` | 75672 | 31 |
+| Mac | `com.local.cc-tmux-hq` | 32134 | 31 |
 
 Each activation compared every existing Claude/Codex/tmux PID and process birth,
 pane/server identity and live non-native route. All protected processes and panes
@@ -226,7 +228,7 @@ Private rollout evidence is `codex-deploy-095-<node>.json`,
 The root also stores `discovery-latency-095-before.json` and
 `discovery-latency-095-after.json` under its existing private state directory.
 
-## Explicit archived detail (0.9.6 source update)
+## Explicit archived detail (0.9.6, Mac owner)
 
 A T3 selection outlived a finished Codex subagent's loaded lifetime. The healthy
 owner still exposed its exact persisted turns/items, but HQ rejected the detail
@@ -240,6 +242,20 @@ them as live. Owner failures remain errors and actions still require loaded stat
 The regression failed before implementation. Focused protocol/fleet tests cover
 native message identity, stale pending controls, no resume/write RPCs on archived
 reads, rejection of every supported action with the archive's current revision,
-wrong owner identity, transport/read failures and unchanged live discovery. Live
-activation evidence must be recorded separately; source tests do not prove a
-deployment or browser integration.
+wrong owner identity, transport/read failures and unchanged live discovery.
+All 529 Python tests passed; changed-file Ruff and independent review passed.
+
+The existing Mac LaunchAgent was upgraded with worker management still disabled,
+using the prior validated procedure and unchanged configuration. All 21 protected
+process identities (PID, birth and command) and 31 tmux panes survived. The Codex
+app-server and every other HQ owner were untouched. Private before/after manifests
+and `deployment.json` are in the Mac release directory.
+
+At 2026-11-17 19:15 UTC, the exact archived subagent UUID returned identical
+persisted conversation history through both the Mac owner and ftower peer. Its
+single conversational message was untruncated; all capabilities were false and
+the row had the documented read-only archive fields. Native `thread/read` remained
+`notLoaded` before and after; the current root thread remained active. No action
+or resume was used. Evidence is `archived-codex-096-proof.json` in the operator's
+private artifact directory. ACP and browser integration are verified separately
+by their owner, not inferred from this HQ read-only proof.
