@@ -145,13 +145,82 @@ def test_discovery_walks_more_than_one_hundred_loaded_threads(owner):
     assert {r["id"] for r in owner.backend.rows()} == set(owner.ids)
 
 
-def test_unloaded_thread_and_forged_identity_never_resume_or_write(owner):
+@pytest.mark.parametrize("state", ["idle", "active"])
+def test_unloaded_thread_and_forged_identity_never_resume_or_write(owner, state):
     owner.ids = []
+    owner.state = state
     with pytest.raises(FleetError, match="not loaded"):
         owner.backend.detail(SID)
     with pytest.raises(FleetError, match="Invalid Codex"):
         owner.backend.detail("../../other")
     assert all(r.get("method") != "thread/resume" for r in owner.calls)
+
+
+def test_archived_detail_reads_exact_persisted_history_without_resuming_or_controls(owner):
+    pending(owner)
+    owner.ids, owner.state = [], "notLoaded"
+    owner.flags = ["waitingOnApproval"]
+    owner.calls.clear()
+
+    detail = owner.backend.detail(SID)
+
+    assert detail["codex_thread_id"] == SID
+    assert detail["read_only"] is True
+    assert detail["lifecycle"] == "ended"
+    assert detail["alive"] is False and detail["online"] is True
+    assert detail["revision"]
+    assert [m["id"] for m in detail["messages"]] == ["user-1", "assistant-1"]
+    assert not any(detail["capabilities"].values())
+    assert detail["native_control"] is None and detail["active_turn_id"] is None
+    assert detail["has_question"] is False and detail["notification_eligible"] is False
+    assert detail["attention_kind"] is None and detail["event_id"] is None
+    assert owner.backend.rows() == []
+    assert {r["method"] for r in owner.calls} <= {
+        "thread/loaded/list", "thread/read", "thread/turns/list", "thread/items/list",
+    }
+    assert all(r.get("params", {}).get("threadId", SID) == SID for r in owner.calls)
+    assert owner.state == "notLoaded" and owner.ids == []
+
+
+@pytest.mark.parametrize("action", ["send", "interrupt", "respond"])
+def test_archived_detail_never_enables_actions_even_with_current_revision(owner, action):
+    owner.ids, owner.state = [], "notLoaded"
+    detail = owner.backend.detail(SID)
+    owner.calls.clear()
+    with pytest.raises(FleetError, match="not loaded"):
+        owner.backend.act(SID, action, detail["revision"], "archive-write", text="Continue",
+                          response={"request_id": "old-request", "behavior": "allow"})
+    assert all(r.get("method") in {
+        "thread/loaded/list", "thread/read", "thread/turns/list", "thread/items/list",
+    } for r in owner.calls)
+
+
+def test_archived_read_rejects_a_different_owner_thread_identity(owner, monkeypatch):
+    owner.ids, owner.state = [], "notLoaded"
+    handle = owner.handle
+
+    def wrong_identity(method, params):
+        result = handle(method, params)
+        if method == "thread/read":
+            result["thread"]["id"] = str(uuid4())
+        return result
+
+    monkeypatch.setattr(owner, "handle", wrong_identity)
+    with pytest.raises(FleetError, match="not loaded"):
+        owner.backend.detail(SID)
+    assert all(r.get("method") not in {
+        "thread/resume", "thread/turns/list", "thread/items/list", "turn/start",
+    } for r in owner.calls)
+
+
+@pytest.mark.parametrize("method", ["thread/loaded/list", "thread/read", "thread/items/list"])
+def test_archived_owner_failure_never_returns_an_empty_success(owner, method):
+    owner.ids, owner.state = [], "notLoaded"
+    owner.error_method = method
+    with pytest.raises(FleetError):
+        owner.backend.detail(SID)
+    assert all(r.get("method") not in {"thread/resume", "turn/start", "turn/interrupt"}
+               for r in owner.calls)
 
 
 def test_send_uses_original_native_owner_without_configuration_overrides(owner):

@@ -10,7 +10,12 @@ and preserve the existing production service and HTTPS owners.
 its `@codex` source through the same locks, receipts and peer federation; do not
 add a second tmux writer or infer Codex identity from a working directory.
 `SessionHistory` retains unloaded or disconnected Codex threads as unreachable,
-not ended. The Rust deployment needs equivalent integration or an explicit
+not ended. Explicit detail may read persisted history for an exact canonical UUID
+absent from the loaded list only when its owner confirms `notLoaded`; that archive
+view is `read_only`, `lifecycle=ended`, `alive=false`, `online=true`, with no controls.
+Never resume an archived read, turn a transport/read error into empty history,
+or allow that detail fallback into action validation or live discovery.
+The Rust deployment needs equivalent integration or an explicit
 same-owner cutover; changing the Python fleet alone does not update it.
 Tests disable automatic Codex discovery in `tests/conftest.py`; protocol tests
 must supply isolated sockets or fakes before explicitly enabling it.

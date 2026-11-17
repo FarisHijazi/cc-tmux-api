@@ -68,6 +68,25 @@ def test_codex_unknown_state_is_not_reclassified_using_claude_terminal_patterns(
     assert row['status'] == row['activity'] == 'unknown'
 
 
+def test_exact_archived_detail_preserves_read_only_contract_through_fleet(backend, monkeypatch):
+    original = fleet.snapshot()['sessions'][0]
+    archived = dict(backend.detail(SID), lifecycle='ended', alive=False, online=True,
+                    read_only=True, capabilities={'send': False, 'interrupt': False, 'respond': False})
+    backend.present = False
+    monkeypatch.setattr(backend, 'detail', lambda sid: copy.deepcopy(archived) if sid == SID else None)
+    detail = fleet.detail(original['id'])
+    assert detail['id'] == original['id']
+    assert fleet._resolve(detail['id']) == (fleet.CODEX_HOST, {'codex': SID})
+    assert detail['lifecycle'] == 'ended' and detail['read_only'] is True
+    assert detail['alive'] is False and detail['online'] is True
+    assert detail['revision'] == archived['revision']
+    assert detail['messages'] == archived['messages']
+    assert not any(detail['capabilities'].values())
+    fleet._cache.clear()
+    assert fleet.snapshot(include_ended=False)['sessions'] == []
+    assert backend.calls == []
+
+
 @pytest.mark.parametrize('action, fields', [
     ('send', {'text': 'Continue this task'}),
     ('interrupt', {}),

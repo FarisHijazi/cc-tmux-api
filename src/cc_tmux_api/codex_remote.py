@@ -280,11 +280,12 @@ class CodexRemote:
             seen.add(cursor)
         raise _error("Codex discovery exceeded the supported session limit")
 
-    def _read(self, sid, *, detail=False):
+    def _read(self, sid, *, detail=False, archived=False):
         thread = self.rpc.call("thread/read", {"threadId": sid, "includeTurns": False})["thread"]
-        if thread["id"] != sid or thread["status"]["type"] == "notLoaded":
+        unloaded = thread["status"]["type"] == "notLoaded"
+        if thread["id"] != sid or unloaded != archived:
             raise _error("Codex thread is not loaded", 409)
-        if detail and sid not in self.rpc._joined:
+        if detail and not archived and sid not in self.rpc._joined:
             # Only rejoin an independently observed, already loaded UUID. Never
             # supply history, path, model, cwd, permissions or other overrides.
             if sid not in self._loaded():
@@ -292,27 +293,28 @@ class CodexRemote:
             self.rpc.call("thread/resume", {"threadId": sid, "excludeTurns": True})
             self.rpc._joined.add(sid)
             thread = self.rpc.call("thread/read", {"threadId": sid, "includeTurns": False})["thread"]
-            if thread["status"]["type"] == "notLoaded":
+            if thread["id"] != sid or thread["status"]["type"] == "notLoaded":
                 raise _error("Codex thread is not loaded", 409)
         turns = self.rpc.call("thread/turns/list", {
             "threadId": sid, "limit": 1, "sortDirection": "desc", "itemsView": "summary",
         })["data"]
         turn = turns[0] if turns else {}
-        pending = self.rpc.pending(sid)
+        pending = [] if archived else self.rpc.pending(sid)
         control = _control(self.rpc, pending)
         native_status = thread["status"]["type"]
         active = native_status == "active"
-        flags = thread["status"].get("activeFlags", [])
+        flags = [] if archived else thread["status"].get("activeFlags", [])
         status = "waiting" if pending or flags else "working" if active else (
             "idle" if native_status == "idle" else "unknown")
-        direct = thread.get("canAcceptDirectInput") is True
+        direct = not archived and thread.get("canAcceptDirectInput") is True
         revision = _digest([self.rpc.epoch, sid, native_status, turn.get("id"),
                             turn.get("status"), self.rpc._inputs.get(sid), pending])
         row = dict(id=sid, session=sid, codex_thread_id=sid, provider="codex", transport="codex",
                    title=thread.get("name") or thread.get("preview", "")[:120] or "Codex",
                    label=thread.get("name") or "Codex", workdir=thread["cwd"],
                    model=thread.get("model"), effort=thread.get("reasoningEffort"),
-                   status=status, lifecycle="alive", alive=True, online=True,
+                   status=status, lifecycle="ended" if archived else "alive",
+                   alive=not archived, online=True, read_only=archived,
                    revision=revision, native_control=control, menu=None, control=None, tail="",
                    has_question=bool(control and control["tool_name"] == "AskUserQuestion"),
                    attention_kind=("question" if control and control["tool_name"] == "AskUserQuestion"
@@ -351,9 +353,7 @@ class CodexRemote:
         except (ValueError, TypeError, AttributeError) as exc:
             raise _error("Invalid Codex thread identity", 400) from exc
         with self._lock:
-            if raw_id not in self._loaded():
-                raise _error("Codex thread is not loaded", 409)
-            return self._read(raw_id, detail=True)
+            return self._read(raw_id, detail=True, archived=raw_id not in self._loaded())
 
     def _history(self, sid, latest_turn):
         previous = self._messages.get(sid, {})

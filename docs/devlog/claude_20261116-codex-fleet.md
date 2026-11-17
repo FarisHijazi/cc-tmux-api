@@ -225,3 +225,21 @@ Private rollout evidence is `codex-deploy-095-<node>.json`,
 `vm-processes-after-095-20261117.json` in the operator's existing artifact directory.
 The root also stores `discovery-latency-095-before.json` and
 `discovery-latency-095-after.json` under its existing private state directory.
+
+## Explicit archived detail (0.9.6 source update)
+
+A T3 selection outlived a finished Codex subagent's loaded lifetime. The healthy
+owner still exposed its exact persisted turns/items, but HQ rejected the detail
+before reading history. Explicit detail now requires both absence from the loaded
+catalog and `thread/read` confirmation of the exact UUID as `notLoaded`, then
+reads persisted history with the same bounded reader. It returns an ended,
+read-only archive view with no controls. Catalog lifecycle summaries still keep
+missing threads unreachable; the archive view neither resumes nor republishes
+them as live. Owner failures remain errors and actions still require loaded state.
+
+The regression failed before implementation. Focused protocol/fleet tests cover
+native message identity, stale pending controls, no resume/write RPCs on archived
+reads, rejection of every supported action with the archive's current revision,
+wrong owner identity, transport/read failures and unchanged live discovery. Live
+activation evidence must be recorded separately; source tests do not prove a
+deployment or browser integration.

@@ -95,8 +95,13 @@ HQ detects the existing local Codex app-server control socket at
 `CC_TMUX_CODEX_SOCKET` selects an existing socket; `CC_TMUX_CODEX=0` disables this
 source. Each existing HQ owner discovers its own currently loaded thread UUIDs
 and federates them through the same peer routes. No new Codex daemon, terminal
-scanner or history writer is started. An unloaded thread is unreachable, not
-proof that its conversation ended.
+scanner or history writer is started. A thread missing from discovery remains
+unreachable in the lifecycle census, not proof that its conversation ended.
+An explicit detail read can retrieve persisted history for its exact canonical
+UUID when the reachable owner confirms `notLoaded`. This archive view returns
+`read_only: true`, `lifecycle: ended`, `alive: false`, and `online: true`, with all
+controls disabled; it never resumes the thread or adds it to live discovery.
+Owner/read failures remain errors, never successful empty history.
 
 The adapter connects through the official app-server WebSocket protocol and
 rejoins an independently verified loaded UUID without changing its model,
