@@ -378,6 +378,8 @@ def test_permission_response_matches_exact_pending_request(native):
 def test_disconnect_is_unreachable_and_only_archive_ends(native):
     backend, client, launch = native
     sid, auth, epoch = register(native)
+    assert backend.detail(sid)['provider'] == 'claude'
+    assert backend.detail(sid)['transport'] == 'native'
     assert backend.detail(sid)["lifecycle"] == "unreachable"
     connected(backend, sid)
     assert backend.detail(sid)["lifecycle"] == "alive"

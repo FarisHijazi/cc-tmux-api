@@ -22,9 +22,15 @@ process, session writer, permanent service, tunnel or T3 fork was added.
 
 ## Current deployment
 
-The Mac HQ reader runs 0.9.6, wheel SHA-256
-`94da0c377a2ae1bd63f1f436801a922cad27f1f7d567285052d8958df3df7336`.
-The other five HQ owners and existing public MCP adapter remain on 0.9.5, wheel SHA-256
+The 0.9.7 release adds explicit `provider=claude` to verified tmux and native
+Claude detail responses, with `transport=tmux` on tmux detail. Fleet is the
+connection layer; these fields let consumers display the actual engine without
+changing opaque routes, session IDs or worker ownership. Four regression cases
+failed before the change; the full HQ suite passed 529 tests. HTTP peers forward
+their owner's detail, so each producing reader needs this additive update.
+All six HQ readers run 0.9.7, wheel SHA-256
+`afc8ddca0484f8323c03a07aebc9b36d530960a916775cf1c627156dfffeaae7`.
+The unchanged public MCP adapter remains on 0.9.5, wheel SHA-256
 `45925b3503d12b9d6c5982df3952096cb86ab71650eea701eb789f45a5c0cbfa`.
 Releases live at `~/.local/share/cc-tmux-api/releases/<sha>/`. Private config,
 native state, session history, push keys, wrappers and listeners are retained.
@@ -33,12 +39,18 @@ passed. No preceding environment was modified.
 
 | Node | Existing owner | Activated HQ PID | Preserved panes |
 | --- | --- | ---: | ---: |
-| Dev | `cc-tmux-hq.service` | 775878 | 10 |
-| Second domain VM | Existing domain unit (release manifest) | 2216259 | 10 |
-| First domain VM | Existing domain unit (release manifest) | 2617098 | 3 |
-| Sahalat | `cc-tmux-api.service` | 1873597 | 0 |
-| Ftower | `cc-tmux-hq.service` | 359421 | 0 |
-| Mac | `com.local.cc-tmux-hq` | 32134 | 31 |
+| Dev | `cc-tmux-hq.service` | 385400 | 8 |
+| Second domain VM | Existing domain unit (release manifest) | 3251997 | 9 |
+| First domain VM | Existing domain unit (release manifest) | 2851299 | 2 |
+| Sahalat | `cc-tmux-api.service` | 2335249 | 0 |
+| Ftower | `cc-tmux-hq.service` | 1513382 | 0 |
+| Mac | `com.local.cc-tmux-hq` | 28945 | 33 |
+
+The 0.9.7 activations preserved 55 protected processes and 52 existing panes
+against fresh per-node baselines. Linux readers retained all preceding live
+non-native routes; the Mac retained all preceding route IDs and the current Codex
+conversation. Only each existing HQ service changed. No native worker was
+stopped or resumed, and MCP, tunnel and T3 services were outside this activation.
 
 Each activation compared every existing Claude/Codex/tmux PID and process birth,
 pane/server identity and live non-native route. All protected processes and panes

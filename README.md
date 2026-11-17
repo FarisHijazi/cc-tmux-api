@@ -112,6 +112,11 @@ use the existing fleet locks, revisions and receipts. Unknown dialogs remain in
 the original client, and uncertain delivery is never automatically repeated.
 Capabilities from the existing thread control the available HQ actions.
 
+Fleet is a discovery and connection layer. Session summaries and detail responses
+identify the native provider (`claude` or `codex`) separately from the transport
+(`tmux`, `native`, or `codex`). Clients must retain that distinction and use the
+owner's capabilities; transport names are not model providers.
+
 Codex sessions also flow through the same cc-proxy MCP and ACP integrations;
 they require no separate connector or T3 provider configuration. Deployment and
 compatibility evidence is recorded in `docs/devlog/claude_20261116-codex-fleet.md`.

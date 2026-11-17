@@ -331,6 +331,7 @@ class NativeRemote:
             label=session["title"],
             title=session["title"],
             workdir=session["config"].get("cwd", ""),
+            provider="claude",
             transport="native",
             claude_session_id=session.get("claude_session_id", sid),
             **({"messages": copy.deepcopy(session["messages"])} if detail else {}),

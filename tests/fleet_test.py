@@ -1000,6 +1000,8 @@ def test_attention_fields_survive_snapshot_without_menu(monkeypatch, tail, quest
     monkeypatch.setattr(probe, 'metadata', lambda *_: {})
     monkeypatch.setattr(probe, 'transcript_path', lambda *_: None)
     row = probe.public(probe.inspect(pane, dict(pid=101, born='birth')))
+    assert row['provider'] == 'claude'
+    assert row['transport'] == 'tmux'
     assert 'menu' not in row
     assert row['has_question'] is question
     assert row['attention_kind'] == kind

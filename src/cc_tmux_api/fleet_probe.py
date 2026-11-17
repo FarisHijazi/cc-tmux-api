@@ -711,6 +711,7 @@ def inspect(pane, proc):
     attention_kind = 'question' if has_question else 'permission' if permission else None
     display = presentation(meta, menu, token=token, status=status, attention_kind=attention_kind)
     return dict(identity=identity, session=pane['session_name'], pane=pane['pane_id'],
+                provider='claude', transport='tmux',
                 title=meta.get('title') or (pane['@hq_title'] if managed else '') or tab_name or pane['pane_title'] or pane['session_name'],
                 workdir=workdir, status=status, status_emoji=display['status_emoji'],
                 status_label=display['status_label'],
