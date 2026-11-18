@@ -12,9 +12,12 @@ import json
 import os
 import re
 import secrets
+import sqlite3
+import tempfile
 import threading
 import time
 from collections import OrderedDict
+from contextlib import closing
 from functools import wraps
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid4, uuid5
@@ -61,6 +64,7 @@ MOD_EVENT_ID = re.compile(rf"({CANONICAL_UUID}):([1-9][0-9]{{0,15}})")
 CONVERSATION_FIELDS = ("claude_session_id", "messages", "streaming", "pending",
                        "pending_requests", "controls", "meta", "external_metadata",
                        "revision", "input_revision")
+OBSERVATION_FIELDS = ("observer", "mod_producers")
 
 
 def _size(value):
@@ -113,15 +117,30 @@ class NativeRemote:
         self._observations = threading.Condition(self._lock)
         self._streams = {}
         self._computer_use_dialogs = False
-        self._path = Path(state_dir) / "native-remote.json"
+        self._path = Path(state_dir).resolve() / "native-remote.sqlite3"
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._sessions = {}
+        if not self._path.exists():
+            self._migrate()
+        self._path.chmod(0o600)
+        with closing(sqlite3.connect(self._path.as_uri() + "?mode=ro", uri=True)) as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 1:
+                raise ValueError("Unsupported native Remote Control database version")
+            if db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+                raise ValueError("Invalid native Remote Control observation ownership")
+            self._sessions = {}
+            for sid, payload, observations in db.execute(
+                    "SELECT s.id,s.payload,o.payload FROM native_sessions s "
+                    "LEFT JOIN native_observations o ON o.id=s.id"):
+                session = json.loads(payload)
+                if not isinstance(session, dict) or session.get("id") != sid:
+                    raise ValueError("Invalid native Remote Control session record")
+                observation = json.loads(observations) if observations is not None else None
+                if (not isinstance(observation, dict)
+                        or observation.keys() - set(OBSERVATION_FIELDS)):
+                    raise ValueError("Invalid native Remote Control observation record")
+                session.update(observation)
+                self._sessions[sid] = session
         self.upstream = None  # rc_mirror.Mirror when this hub mirrors to Anthropic
-        if self._path.exists():
-            data = json.loads(self._path.read_text())
-            if data.get("version") != 1 or not isinstance(data.get("sessions"), dict):
-                raise ValueError("Invalid native Remote Control state")
-            self._sessions = data["sessions"]
         # No mirror link survives a restart; one starts again when the CLI next calls.
         for session in self._sessions.values():
             upstream = session.get("upstream")
@@ -156,7 +175,7 @@ class NativeRemote:
         )
         session["dialog_declaration_epoch"] = session["epoch"]
         session["dialog_declaration_request_id"] = request_id
-        self._save()
+        self._save(session)
 
     def _mirror(self, session, kind=None, body=None):
         """Hand work to the upstream mirror; it only enqueues, so this is safe under the lock."""
@@ -206,7 +225,7 @@ class NativeRemote:
             upstream = session.setdefault("upstream", {})
             if any(upstream.get(key) != value for key, value in fields.items()):
                 upstream.update(fields)
-                self._save()
+                self._save(session)
 
     def upstream_inject(self, sid, upstream_event_id, payload, sequence):
         """Queue a claude.ai/app event for the CLI exactly as if HQ's UI had sent it."""
@@ -237,15 +256,73 @@ class NativeRemote:
                         self._pending(session).pop(payload["response"]["request_id"], None)
                     session["input_revision"] = session["revision"]
             upstream["cursor"] = sequence
-            self._save()
+            self._save(session)
 
-    def _save(self):
-        temporary = self._path.with_suffix(".tmp")
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as out:
-            out.write(json.dumps({"version": 1, "sessions": self._sessions}))
-        os.replace(temporary, self._path)
+    def _migrate(self):
+        """Publish one complete database; retain legacy JSON as an immutable snapshot."""
+        legacy = self._path.with_suffix(".json")
+        sessions = {}
+        if legacy.exists():
+            data = json.loads(legacy.read_text())
+            if data.get("version") != 1 or not isinstance(data.get("sessions"), dict):
+                raise ValueError("Invalid native Remote Control state")
+            sessions = data["sessions"]
+            if any(not isinstance(session, dict) or session.get("id") != sid
+                   for sid, session in sessions.items()):
+                raise ValueError("Invalid native Remote Control session record")
+        fd, name = tempfile.mkstemp(prefix=".native-remote-", suffix=".sqlite3",
+                                    dir=self._path.parent)
+        os.close(fd)
+        temporary = Path(name)
+        try:
+            with closing(sqlite3.connect(temporary)) as db, db:
+                db.execute("PRAGMA synchronous=FULL")
+                db.execute("PRAGMA foreign_keys=ON")
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("CREATE TABLE native_sessions (id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+                db.execute("CREATE TABLE native_observations (id TEXT PRIMARY KEY "
+                           "REFERENCES native_sessions(id) ON DELETE CASCADE, payload TEXT NOT NULL)")
+                db.executemany("INSERT INTO native_sessions VALUES (?,?)",
+                               ((sid, json.dumps({key: value for key, value in session.items()
+                                                  if key not in OBSERVATION_FIELDS}))
+                                for sid, session in sessions.items()))
+                db.executemany("INSERT INTO native_observations VALUES (?,?)",
+                               ((sid, json.dumps({key: session[key] for key in OBSERVATION_FIELDS
+                                                  if key in session}))
+                                for sid, session in sessions.items()))
+                db.execute("PRAGMA user_version=1")
+            os.replace(temporary, self._path)
+            directory = os.open(self._path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _save(self, *sessions, deleted=(), observations_only=False):
+        # The owner lock protects live objects; each commit replaces only the touched records.
+        observations = [(session["id"], json.dumps({key: session[key] for key in OBSERVATION_FIELDS
+                                                  if key in session})) for session in sessions]
+        with closing(sqlite3.connect(self._path.as_uri() + "?mode=rw", uri=True,
+                                     timeout=10)) as db, db:
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("PRAGMA foreign_keys=ON")
+            db.execute("BEGIN IMMEDIATE")
+            if observations_only:
+                changed = db.executemany("UPDATE native_observations SET payload=? WHERE id=?",
+                                         ((payload, sid) for sid, payload in observations)).rowcount
+                if changed != len(observations):
+                    raise sqlite3.IntegrityError("Native observation owner is missing")
+            else:
+                records = [(session["id"], json.dumps({key: value for key, value in session.items()
+                                                       if key not in OBSERVATION_FIELDS}))
+                           for session in sessions]
+                db.executemany("INSERT INTO native_sessions VALUES (?,?) ON CONFLICT(id) "
+                               "DO UPDATE SET payload=excluded.payload", records)
+                db.executemany("INSERT INTO native_observations VALUES (?,?) ON CONFLICT(id) "
+                               "DO UPDATE SET payload=excluded.payload", observations)
+            db.executemany("DELETE FROM native_sessions WHERE id=?", ((sid,) for sid in deleted))
         with self._observations:
             self._observations.notify_all()
 
@@ -399,7 +476,15 @@ class NativeRemote:
                 if len(matches) != 1:
                     raise HTTPException(409, "Claude session identity is ambiguous")
                 session = matches[0]
-            candidate = copy.deepcopy(session)
+            candidate = dict(session)
+            for key in OBSERVATION_FIELDS:
+                if key in candidate:
+                    candidate[key] = copy.deepcopy(candidate[key])
+            binding_changed = session.get("claude_session_id") != conversation
+            if binding_changed:
+                for key in ("meta", "external_metadata"):
+                    if key in candidate:
+                        candidate[key] = copy.deepcopy(candidate[key])
             producers = candidate.setdefault("mod_producers", {})
             results = []
             changed = session.get("claude_session_id") != conversation
@@ -450,7 +535,7 @@ class NativeRemote:
                     else:
                         session.pop(key, None)
                 try:
-                    self._save()
+                    self._save(session, observations_only=not binding_changed)
                 except BaseException:
                     for key, value in previous.items():
                         if value is missing:
@@ -624,7 +709,7 @@ class NativeRemote:
             self._sessions.pop(sid)
             self._streams.pop(sid, None)
         if expired:
-            self._save()
+            self._save(deleted=expired)
 
     def rows(self):
         with self._lock:
@@ -788,7 +873,7 @@ class NativeRemote:
                 controls[request_id] = [key, text]
                 session["controls"] = dict(list(controls.items())[-64:])
             session["input_revision"] = session["revision"]
-            self._save()
+            self._save(session)
             receipt = dict(
                 ok=True,
                 id=raw_id,
@@ -1240,7 +1325,7 @@ class NativeRemote:
                     private=request.headers.get("x-hq-private") == "1",
                 )
                 self._sessions[sid] = session
-                self._save()
+                self._save(session)
                 self._mirror(session)
             return {"session": {"id": sid}}
 
@@ -1267,7 +1352,7 @@ class NativeRemote:
                 session["worker_hash"] = _digest(token)
                 session["token_expires_at"] = time.time() + 86400
                 self._touch(session)
-                self._save()
+                self._save(session)
                 return dict(
                     worker_jwt=token,
                     worker_epoch=session["epoch"],
@@ -1384,7 +1469,7 @@ class NativeRemote:
                     )
                 self._touch(session)
                 if request.method == "PUT":
-                    self._save()
+                    self._save(session)
                 return dict(
                     worker_epoch=session["epoch"],
                     worker_status=session["worker_status"],
@@ -1446,7 +1531,7 @@ class NativeRemote:
                             results.append({"event_id": eid or str(uuid4()), "duplicate": duplicate})
                         session["seen_events"] = list(seen)[-MAX_EVENTS:]
                         self._touch(session)
-                        self._save()
+                        self._save(session)
                     except BaseException:
                         session.clear()
                         session.update(previous)
@@ -1493,7 +1578,7 @@ class NativeRemote:
                     self._touch(session)
                     self._mirror(session)
                     if operation != "heartbeat":
-                        self._save()
+                        self._save(session)
                     return {"heartbeat_interval_seconds": 20} if operation == "heartbeat" else {}
                 raise HTTPException(404, "Unsupported native worker operation")
 
@@ -1520,7 +1605,7 @@ class NativeRemote:
                     raise HTTPException(400, "title must be a string")
                 session["title"] = body["title"]
                 session["revision"] += 1
-                self._save()
+                self._save(session)
             return {}
 
         @router.post("/{sid}/archive")
@@ -1532,7 +1617,7 @@ class NativeRemote:
                 session["archived"] = True
                 session["archived_at"] = time.time()
                 session["revision"] += 1
-                self._save()
+                self._save(session)
                 self._mirror(session, "archive")
             return {}
 

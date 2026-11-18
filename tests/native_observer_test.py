@@ -28,7 +28,7 @@ def observer(tmp_path):
     sid = client.post("/v1/code/sessions", json={}, headers=headers).json()["session"]["id"]
     conversation = str(uuid4())
     backend._sessions[sid]["claude_session_id"] = conversation
-    backend._save()
+    backend._save(*backend._sessions.values())
     return backend, client, headers, sid, conversation
 
 
@@ -173,7 +173,7 @@ def test_native_pair_binding_rolls_back_if_batch_or_durable_save_fails(observer,
     assert publish(observer, [event(uuid4(), 2)], native_session_id=sid).status_code == 409
     assert backend._sessions[sid] == before
     save = backend._save
-    def fail():
+    def fail(*_args, **_kwargs):
         raise OSError('binding persistence failed')
     monkeypatch.setattr(backend, '_save', fail)
     item = event(uuid4())
@@ -209,7 +209,7 @@ def test_conversation_rotation_invalidates_old_actions_but_not_on_retry(observer
 def test_rotation_command_fence_rolls_back_with_failed_durable_save(observer, monkeypatch):
     backend, _, _, sid, first = observer
     before = copy.deepcopy(backend._sessions[sid])
-    def fail():
+    def fail(*_args, **_kwargs):
         raise OSError('rotation persistence failed')
     monkeypatch.setattr(backend, '_save', fail)
     with pytest.raises(OSError):
@@ -236,7 +236,7 @@ def test_conversation_rotation_clears_history_and_requests_but_preserves_transpo
                    sequence=7, delivered_sequence=6, acknowledged={'older-command': 'processed'},
                    seen_events=['old-native-event'], worker_status='running')
     backend._streams[sid] = {'epoch': session['epoch'], 'id': 'existing-lease'}
-    backend._save()
+    backend._save(*backend._sessions.values())
     assert publish(observer, [event(uuid4())]).status_code == 200
     before = copy.deepcopy(session)
     lease = copy.deepcopy(backend._streams[sid])
@@ -248,7 +248,7 @@ def test_conversation_rotation_clears_history_and_requests_but_preserves_transpo
         with backend._lock:
             backend._ingest(session, {'type': 'system', 'subtype': 'init', 'session_id': second,
                                      'model': 'new-model'})
-            backend._save()
+            backend._save(*backend._sessions.values())
     row = backend.detail(sid)
     assert row['claude_session_id'] == second and row['messages'] == []
     assert row['streaming'] is None and row['native_control'] is None
@@ -268,7 +268,7 @@ def test_conversation_rotation_clears_history_and_requests_but_preserves_transpo
     with backend._lock:
         backend._ingest(session, {'type': 'assistant', 'uuid': 'new-message',
             'message': {'content': [{'type': 'text', 'text': 'new conversation'}]}})
-        backend._save()
+        backend._save(*backend._sessions.values())
     assert [message['id'] for message in backend.detail(sid)['messages']] == ['new-message']
 
 
@@ -280,7 +280,7 @@ def test_failed_rotation_restores_all_conversation_state(observer, monkeypatch):
                    controls={'old': ['model', 'model']}, meta={'context_tokens': 12},
                    external_metadata={'task_summary': 'keep task'})
     before = copy.deepcopy(session)
-    def fail():
+    def fail(*_args, **_kwargs):
         raise OSError('conversation persistence failed')
     monkeypatch.setattr(backend, '_save', fail)
     with pytest.raises(OSError):
@@ -342,7 +342,7 @@ def test_native_init_canonical_identity_rotation_also_invalidates_old_actions(ob
     with backend._lock:
         backend._ingest(backend._sessions[sid], {'type': 'system', 'subtype': 'init',
                                                 'session_id': str(uuid4())})
-        backend._save()
+        backend._save(*backend._sessions.values())
     with pytest.raises(FleetError, match='changed; refresh'):
         backend.act(sid, 'send', original, 'old-native-identity', text='never send')
     assert backend._sessions[sid]['inbound'] == []
@@ -420,7 +420,7 @@ def test_save_failure_rolls_back_mod_acceptance(observer, monkeypatch):
     backend, _, _, sid, _ = observer
     before = copy.deepcopy(backend._sessions[sid])
     persisted = backend._path.read_bytes()
-    def fail():
+    def fail(*_args, **_kwargs):
         raise OSError("simulated disk failure")
     monkeypatch.setattr(backend, "_save", fail)
     with pytest.raises(OSError, match="disk failure"):
@@ -457,7 +457,7 @@ def test_native_save_failure_does_not_publish_or_deduplicate_uncommitted_events(
             "content": [{"type": "text", "text": "Only once after persistence"}]}}}]}
     before = copy.deepcopy(backend._sessions[sid])
     save = backend._save
-    def fail():
+    def fail(*_args, **_kwargs):
         raise OSError("simulated disk failure")
     monkeypatch.setattr(backend, "_save", fail)
     with pytest.raises(OSError):
@@ -480,7 +480,7 @@ def test_observer_byte_budget_and_oversized_native_event_are_explicit(observer, 
     with backend._lock:
         backend._ingest(backend._sessions[sid], {
             "type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 70000}]}})
-        backend._save()
+        backend._save(*backend._sessions.values())
     last = backend.observe(sid)["events"][-1]
     assert last["source"] == "native" and last["kind"] == "gap"
     assert last["data"] == {"reason": "event_too_large", "kind": "assistant"}
@@ -504,7 +504,7 @@ def test_unrepresentable_native_observations_have_bounded_gaps(observer, payload
     backend, _, _, sid, _ = observer
     with backend._lock:
         backend._ingest(backend._sessions[sid], payload)
-        backend._save()
+        backend._save(*backend._sessions.values())
     result = backend.observe(sid)
     assert len(result["events"]) == 1
     item = result["events"][0]
@@ -517,10 +517,10 @@ def test_long_poll_wakes_only_after_durable_acceptance(observer, monkeypatch):
     entered, release = threading.Event(), threading.Event()
     save = backend._save
     cursor = backend.observe(sid)["cursor"]
-    def slow_save():
+    def slow_save(*sessions, **kwargs):
         entered.set()
         assert release.wait(3)
-        save()
+        save(*sessions, **kwargs)
     monkeypatch.setattr(backend, "_save", slow_save)
     @client.app.get("/health")
     async def health():
@@ -541,6 +541,6 @@ def test_long_poll_wakes_only_after_durable_acceptance(observer, monkeypatch):
             assert (await write).status_code == 200
             result = await observed
             assert len(result["events"]) == 1
-            saved = json.loads(backend._path.read_text())["sessions"][sid]["observer"]
+            saved = NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions[sid]["observer"]
             assert saved["events"][-1]["cursor"] == result["cursor"]
     asyncio.run(exercise())

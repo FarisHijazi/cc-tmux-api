@@ -15,31 +15,6 @@ from cc_tmux_api.fleet import FleetError
 from cc_tmux_api.native_remote import MAX_EVENTS, NativeRemote, _frame, get_backend
 
 
-def test_registry_save_preserves_exact_format_and_atomic_private_replacement(tmp_path, monkeypatch):
-    import os
-
-    backend = NativeRemote(tmp_path, "test-" + "x" * 40)
-    backend._sessions = {"test-session": {"text": "Unicode: مرحبا", "events": [1, None, True]}}
-    previous = '{"version": 1, "sessions": {}}'
-    backend._path.write_text(previous)
-    expected = json.dumps({"version": 1, "sessions": backend._sessions})
-    replace = os.replace
-    replacements = []
-
-    def verify_atomic(source, destination):
-        assert backend._path.read_text() == previous
-        assert source.read_text() == expected
-        assert source.stat().st_mode & 0o777 == 0o600
-        replacements.append((source, destination))
-        replace(source, destination)
-
-    monkeypatch.setattr(os, "replace", verify_atomic)
-    backend._save()
-    assert replacements == [(backend._path.with_suffix(".tmp"), backend._path)]
-    assert backend._path.read_text() == expected
-    assert backend._path.stat().st_mode & 0o777 == 0o600
-
-
 @pytest.mark.parametrize("method,suffix", [
     ("POST", ""), ("POST", "/{sid}/bridge"), ("GET", "/{sid}/worker"),
     ("PUT", "/{sid}/worker"), ("POST", "/{sid}/worker/heartbeat"),
@@ -90,10 +65,10 @@ def test_native_save_finishes_before_ack_without_blocking_event_loop(native, mon
     entered, release = threading.Event(), threading.Event()
     save = backend._save
 
-    def slow_save():
+    def slow_save(*sessions, **kwargs):
         entered.set()
         release.wait(3)
-        save()
+        save(*sessions, **kwargs)
 
     monkeypatch.setattr(backend, "_save", slow_save)
 
@@ -107,12 +82,12 @@ def test_native_save_finishes_before_ack_without_blocking_event_loop(native, mon
                 assert await asyncio.to_thread(entered.wait, 1)
                 assert time.monotonic() - started < 1
                 assert not request.done()
-                assert not backend._path.exists()
+                assert NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions == {}
             finally:
                 release.set()
             response = await request
             assert response.status_code == 200
-            assert response.json()["session"]["id"] in json.loads(backend._path.read_text())["sessions"]
+            assert response.json()["session"]["id"] in NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions
 
     asyncio.run(exercise())
 
@@ -257,9 +232,9 @@ def test_registration_auth_and_worker_session_isolation(native):
         client.get(f"/v1/code/sessions/{first}/worker", headers=auth).json()["worker_epoch"]
         == epoch
     )
-    disk = backend._path.read_text()
-    assert auth["Authorization"][7:] not in disk
-    assert launch["x-hq-native-key"] not in disk
+    disk = backend._path.read_bytes()
+    assert auth["Authorization"][7:].encode() not in disk
+    assert launch["x-hq-native-key"].encode() not in disk
     assert backend._path.stat().st_mode & 0o777 == 0o600
 
 
@@ -567,7 +542,7 @@ def test_heartbeat_touches_liveness_without_rewriting_journal(native, monkeypatc
     sid, auth, epoch = register(native)
     before = backend._sessions[sid]["last_seen"]
 
-    def forbidden():
+    def forbidden(*_args, **_kwargs):
         raise AssertionError("heartbeat must not rewrite transcript journal")
 
     monkeypatch.setattr(backend, "_save", forbidden)
@@ -621,7 +596,7 @@ def test_archived_transport_records_expire_but_unreachable_records_do_not(native
     backend._sessions[archived]["archived_at"] -= RETENTION_SECONDS + 1
     backend._sessions[retained]["last_seen"] -= RETENTION_SECONDS + 1
     assert [row["id"] for row in backend.rows()] == [retained]
-    assert archived not in json.loads(backend._path.read_text())["sessions"]
+    assert archived not in NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions
 
 
 def test_local_native_approval_dismisses_web_pending_prompt(native):
