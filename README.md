@@ -145,9 +145,15 @@ conflicting UUIDs return 409. Unknown or archived explicit owners return 404.
 Binding and event acceptance share one atomic save; a failed batch changes neither.
 Rotating an existing canonical UUID also advances the native revision and action
 floor atomically, so commands inspected under the previous conversation fail.
+That same transition clears the old conversation's cached messages, partial text,
+pending approval cards, model/mode response bookkeeping and context/task summary.
+New detail reads cannot label old cached history with the new UUID. Native
+transcript files, connection state, queued commands, delivery acknowledgments,
+deduplication receipts and the bounded observer tail remain intact.
 Initial bridge-to-UUID binding, repeated bindings and later observations leave
-that floor unchanged. Native init carrying an actual changed UUID uses the same
-fence; its ordinary bridge placeholder never changes identity.
+that floor and current cached history unchanged. Native init carrying an actual
+changed UUID uses the same transition before ingesting the new conversation's
+events; its ordinary bridge placeholder never changes identity.
 Repeated native init events carrying the bridge placeholder cannot erase the UUID.
 Without these optional fields, existing unique-UUID resolution remains supported.
 

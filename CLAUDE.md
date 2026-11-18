@@ -83,6 +83,11 @@ and save the identity atomically with its event batch. Mod events cannot enter
 and initial bridge-to-UUID binding do not change revisions. Canonical UUID rotation
 must atomically advance revision/input_revision to reject actions inspected under
 the old conversation, including rotations reported by native init itself.
+The same transition clears conversation caches (messages, streaming, pending
+cards/control bookkeeping and context/task summary) before new ingestion. Preserve
+native transport, command/delivery lanes and observer/deduplication continuity.
+Native batch capacity preflight must apply that transition to its pending-card
+preview too. Initial qualification and repeated bindings never clear history.
 Native and Mod acceptance wake readers only after a
 durable save; preserve the session object's identity when rolling back a failure.
 Producer UUID/sequence high-watermarks prevent an evicted receipt from becoming a

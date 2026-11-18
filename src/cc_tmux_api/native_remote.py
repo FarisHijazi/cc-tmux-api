@@ -58,6 +58,9 @@ MOD_KINDS = frozenset(("prompt.submit", "turn.start", "turn.step", "turn.complet
 CANONICAL_UUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
 OBSERVER_CURSOR = re.compile(rf"({CANONICAL_UUID}):([0-9]{{1,18}})")
 MOD_EVENT_ID = re.compile(rf"({CANONICAL_UUID}):([1-9][0-9]{{0,15}})")
+CONVERSATION_FIELDS = ("claude_session_id", "messages", "streaming", "pending",
+                       "pending_requests", "controls", "meta", "external_metadata",
+                       "revision", "input_revision")
 
 
 def _size(value):
@@ -436,22 +439,21 @@ class NativeRemote:
                 changed = True
             if changed:
                 # Keep the live session object: active stream handlers retain its identity.
-                previous = {key: session.get(key) for key in
-                            ("observer", "mod_producers", "claude_session_id", "revision", "input_revision")}
-                current = session.get("claude_session_id")
-                if (current != conversation and isinstance(current, str)
-                        and re.fullmatch(CANONICAL_UUID, current)):
-                    # A conversation change invalidates commands inspected under
-                    # the previous identity; passive events/initial binding do not.
-                    session["revision"] += 1
-                    session["input_revision"] = session["revision"]
-                session.update(observer=candidate["observer"], mod_producers=producers,
-                               claude_session_id=conversation)
+                if self._bind_conversation(candidate, conversation, candidate["revision"] + 1):
+                    candidate["revision"] += 1
+                fields = ("observer", "mod_producers", *CONVERSATION_FIELDS)
+                missing = object()
+                previous = {key: session.get(key, missing) for key in fields}
+                for key in fields:
+                    if key in candidate:
+                        session[key] = candidate[key]
+                    else:
+                        session.pop(key, None)
                 try:
                     self._save()
                 except BaseException:
                     for key, value in previous.items():
-                        if value is None:
+                        if value is missing:
                             session.pop(key, None)
                         else:
                             session[key] = value
@@ -460,6 +462,23 @@ class NativeRemote:
             return {"session_id": session["id"], "claude_session_id": body["claude_session_id"],
                     "results": results,
                     "cursor": f"{state['epoch']}:{state['sequence']}"}
+
+    @staticmethod
+    def _bind_conversation(session, conversation, next_revision):
+        """Reset conversation caches on rotation, retaining the native transport."""
+        current = session.get("claude_session_id")
+        rotated = (current != conversation and isinstance(current, str)
+                   and re.fullmatch(CANONICAL_UUID, current) is not None)
+        if rotated:
+            session.update(messages=[], streaming=None, pending_requests={}, controls={})
+            session.pop("pending", None)
+            for key in ("context_tokens", "control_error"):
+                session.get("meta", {}).pop(key, None)
+            for key in ("context_usage", "task_summary"):
+                session.get("external_metadata", {}).pop(key, None)
+            session["input_revision"] = next_revision
+        session["claude_session_id"] = conversation
+        return rotated
 
     def _get(self, sid):
         if sid not in self._sessions:
@@ -1109,9 +1128,15 @@ class NativeRemote:
     def _ingest(self, session, payload, event_id=None):
         if not isinstance(payload, dict):
             return
+        kind = payload.get("type")
+        if kind == "system" and payload.get("subtype") == "init":
+            # Current Remote Control substitutes a cse_ bridge placeholder. Only
+            # an actual UUID can rotate history; clear before ingesting new data.
+            value = payload.get("session_id")
+            if isinstance(value, str) and re.fullmatch(CANONICAL_UUID, value):
+                self._bind_conversation(session, value, session["revision"] + 1)
         self._message(session, payload)
         self._metadata(session, payload)
-        kind = payload.get("type")
         if kind == "stream_event":
             self._stream(session, payload)
         for incoming in self._incoming_requests(session, payload):
@@ -1137,16 +1162,6 @@ class NativeRemote:
             self._pending(session).pop(payload["response"]["request_id"], None)
         elif kind == "control_cancel_request":
             self._pending(session).pop(payload.get("request_id"), None)
-        elif kind == "system" and payload.get("subtype") == "init":
-            # Current CLI Remote Control replaces the local UUID with the cse_
-            # bridge ID. That wire placeholder must not erase an explicit binding.
-            value = payload.get("session_id")
-            if isinstance(value, str) and re.fullmatch(CANONICAL_UUID, value):
-                current = session.get("claude_session_id")
-                if (value != current and isinstance(current, str)
-                        and re.fullmatch(CANONICAL_UUID, current)):
-                    session["input_revision"] = session["revision"] + 1
-                session["claude_session_id"] = value
         elif kind == "result":
             session["worker_status"] = "idle"
             session["streaming"] = None
@@ -1399,10 +1414,17 @@ class NativeRemote:
                     previous = copy.deepcopy(session)
                     seen = OrderedDict((key, True) for key in session["seen_events"])
                     pending = copy.deepcopy(self._pending(session))
+                    preview = {"claude_session_id": session.get("claude_session_id"),
+                               "pending_requests": pending}
                     for item in events:
                         if self._event_identity(item) in seen:
                             continue
                         payload = item["payload"]
+                        if payload.get("type") == "system" and payload.get("subtype") == "init":
+                            value = payload.get("session_id")
+                            if isinstance(value, str) and re.fullmatch(CANONICAL_UUID, value):
+                                self._bind_conversation(preview, value, session["revision"] + 1)
+                                pending = preview["pending_requests"]
                         for incoming in self._incoming_requests(session, payload):
                             pending[incoming["request_id"]] = incoming
                         if payload.get("type") == "control_cancel_request":

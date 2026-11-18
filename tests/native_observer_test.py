@@ -218,6 +218,115 @@ def test_rotation_command_fence_rolls_back_with_failed_durable_save(observer, mo
     assert backend._sessions[sid] == before
 
 
+@pytest.mark.parametrize('source', ['mod', 'native'])
+def test_conversation_rotation_clears_history_and_requests_but_preserves_transport(observer, source):
+    backend, _, _, sid, first = observer
+    session = backend._sessions[sid]
+    session.update(messages=[{'id': 'old-message', 'role': 'assistant', 'text': 'old conversation'}],
+                   streaming='old partial text', pending={'request_id': 'old-legacy'},
+                   pending_requests={'old-permission': {'request_id': 'old-permission',
+                     'tool_name': 'Bash', 'input': {'command': 'old'}, 'subtype': 'can_use_tool'}},
+                   controls={'old-model-change': ['model', 'old-model']},
+                   meta={'model': 'current-model', 'permission_mode': 'default',
+                         'context_tokens': 1234, 'control_error': 'old error',
+                         'rate_limits': {'five_hour': {'utilization': 0.1}}},
+                   external_metadata={'context_usage': {'used_tokens': 1234},
+                         'task_summary': 'old task', 'model': 'current-model'},
+                   inbound=[{'sequence_num': 7, 'event_id': 'already-queued', 'payload': {'type': 'user'}}],
+                   sequence=7, delivered_sequence=6, acknowledged={'older-command': 'processed'},
+                   seen_events=['old-native-event'], worker_status='running')
+    backend._streams[sid] = {'epoch': session['epoch'], 'id': 'existing-lease'}
+    backend._save()
+    assert publish(observer, [event(uuid4())]).status_code == 200
+    before = copy.deepcopy(session)
+    lease = copy.deepcopy(backend._streams[sid])
+    second = str(uuid4())
+    if source == 'mod':
+        assert publish(observer, [event(uuid4())], native_session_id=sid,
+                       claude_session_id=second, previous_claude_session_id=first).status_code == 200
+    else:
+        with backend._lock:
+            backend._ingest(session, {'type': 'system', 'subtype': 'init', 'session_id': second,
+                                     'model': 'new-model'})
+            backend._save()
+    row = backend.detail(sid)
+    assert row['claude_session_id'] == second and row['messages'] == []
+    assert row['streaming'] is None and row['native_control'] is None
+    assert not row['has_question'] and row['task_summary'] is None and row['context_tokens'] is None
+    assert row['model'] == ('new-model' if source == 'native' else 'current-model')
+    assert row['permission_mode'] == 'default'
+    assert row['control_error'] is None and row['rate_limits'] == before['meta']['rate_limits']
+    assert session['controls'] == {}
+    for key in ('last_seen', 'epoch', 'worker_hash', 'worker_status', 'inbound', 'sequence',
+                'delivered_sequence', 'acknowledged', 'seen_events'):
+        assert session[key] == before[key]
+    assert backend._streams[sid] == lease
+    assert session['observer']['events'][:1] == before['observer']['events']
+    assert session['observer']['sequence'] == before['observer']['sequence'] + 1
+    for producer, receipt in before['mod_producers'].items():
+        assert session['mod_producers'][producer] == receipt
+    with backend._lock:
+        backend._ingest(session, {'type': 'assistant', 'uuid': 'new-message',
+            'message': {'content': [{'type': 'text', 'text': 'new conversation'}]}})
+        backend._save()
+    assert [message['id'] for message in backend.detail(sid)['messages']] == ['new-message']
+
+
+def test_failed_rotation_restores_all_conversation_state(observer, monkeypatch):
+    backend, _, _, sid, first = observer
+    session = backend._sessions[sid]
+    session.update(messages=[{'id': 'old', 'role': 'user', 'text': 'keep on failure'}],
+                   streaming=None, pending={'request_id': 'old'}, pending_requests={},
+                   controls={'old': ['model', 'model']}, meta={'context_tokens': 12},
+                   external_metadata={'task_summary': 'keep task'})
+    before = copy.deepcopy(session)
+    def fail():
+        raise OSError('conversation persistence failed')
+    monkeypatch.setattr(backend, '_save', fail)
+    with pytest.raises(OSError):
+        publish(observer, [event(uuid4())], native_session_id=sid,
+                claude_session_id=str(uuid4()), previous_claude_session_id=first)
+    assert session == before
+
+
+def test_initial_uuid_qualification_and_same_identity_events_keep_history(observer):
+    backend, _, _, sid, _ = observer
+    session = backend._sessions[sid]
+    session.update(claude_session_id=sid,
+                   messages=[{'id': 'current', 'role': 'assistant', 'text': 'already current'}],
+                   streaming='current partial', pending_requests={'current': {'request_id': 'current'}},
+                   controls={'current': ['model', 'current-model']})
+    before = copy.deepcopy(session)
+    producer = uuid4()
+    assert publish(observer, [event(producer)], native_session_id=sid).status_code == 200
+    assert publish(observer, [event(producer, 2)], native_session_id=sid).status_code == 200
+    for key in ('messages', 'streaming', 'pending_requests', 'controls', 'revision', 'last_seen'):
+        assert session[key] == before[key]
+
+
+def test_native_rotation_batch_preflight_does_not_count_old_permissions(observer):
+    backend, client, launch, sid, _ = observer
+    bridge = client.post(f'/v1/code/sessions/{sid}/bridge', headers=launch, json={}).json()
+    session = backend._sessions[sid]
+    session['pending_requests'] = {str(n): {'request_id': str(n), 'tool_name': 'Bash',
+        'input': {'command': 'old'}, 'subtype': 'can_use_tool'} for n in range(64)}
+    second = str(uuid4())
+    response = client.post(f'/v1/code/sessions/{sid}/worker/events',
+        headers={'Authorization': f'Bearer {bridge["worker_jwt"]}'},
+        json={'worker_epoch': bridge['worker_epoch'], 'events': [
+            {'payload': {'type': 'system', 'subtype': 'init', 'session_id': second, 'uuid': 'new-init'}},
+            {'payload': {'type': 'assistant', 'uuid': 'current-message',
+                         'message': {'content': [{'type': 'text', 'text': 'current history'}]}}},
+            {'payload': {'type': 'control_request', 'request_id': 'new-permission',
+                         'request': {'subtype': 'can_use_tool', 'tool_name': 'Bash',
+                                     'input': {'command': 'current'}}}},
+        ]})
+    assert response.status_code == 200
+    assert session['claude_session_id'] == second
+    assert set(session['pending_requests']) == {'new-permission'}
+    assert [message['id'] for message in session['messages']] == ['current-message']
+
+
 def test_native_init_bridge_placeholder_does_not_overwrite_explicit_uuid(observer):
     backend, _, _, sid, conversation = observer
     with backend._lock:
