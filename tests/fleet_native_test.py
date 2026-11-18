@@ -67,3 +67,38 @@ def test_native_identity_cannot_be_confused_with_terminal(backend):
     for identity in ({'native': '../../other'}, {'native': 'cse_x', 'peer': 'x'}, ['cse_x']):
         with pytest.raises(fleet.FleetError, match='native session route'):
             fleet.detail(fleet._encode('@native', identity))
+
+
+def test_observer_reuses_exact_native_and_peer_routes(backend, monkeypatch):
+    calls = []
+    cursor = 'opaque-cursor'
+    def observe(sid, after, wait):
+        calls.append((sid, after, wait))
+        return {'session_id': sid, 'events': [], 'cursor': cursor, 'reset': False}
+    backend.observe = observe
+    native_id = fleet._encode('@native', {'native': 'cse_toy'})
+    assert fleet.observe(native_id, cursor, 10)['session_id'] == native_id
+    assert calls == [('cse_toy', cursor, 10)]
+    monkeypatch.setenv('CC_TMUX_HOSTS', '[{"id":"peer","label":"Peer","url":"http://peer"}]')
+    forwarded = []
+    def peer(host, endpoint, path, payload=None, **options):
+        forwarded.append((endpoint, path, payload, options))
+        return {'session_id': native_id, 'events': [], 'cursor': cursor, 'reset': False}
+    monkeypatch.setattr(fleet, '_peer', peer)
+    peer_id = fleet._encode('peer', {'peer': native_id})
+    assert fleet.observe(peer_id, cursor, 10)['session_id'] == peer_id
+    assert forwarded == [(f'/api/sessions/{native_id}/events?wait=10&after=opaque-cursor',
+                          ('toy',), None, {'timeout': 30})]
+    monkeypatch.setattr(fleet, '_peer', lambda *a, **k: {'session_id': 'another-session'})
+    with pytest.raises(fleet.FleetError, match='different session identity'):
+        fleet.observe(peer_id)
+
+
+def test_observer_rejects_other_transports_and_cascade_cycles(backend, monkeypatch):
+    monkeypatch.setattr(fleet, 'codex_backend', lambda: object())
+    codex_id = fleet._encode('@codex', {'codex': '00000000-0000-0000-0000-000000000001'})
+    with pytest.raises(fleet.FleetError, match='does not support'):
+        fleet.observe(codex_id)
+    native_id = fleet._encode('@native', {'native': 'cse_toy'})
+    with pytest.raises(fleet.FleetError, match='cycle'):
+        fleet.observe(native_id, path=('toy',))

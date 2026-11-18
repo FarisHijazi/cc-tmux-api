@@ -145,14 +145,14 @@ class _NoRedirect(urlrequest.HTTPRedirectHandler):
         return None
 
 
-def _peer(host, endpoint, path, payload=None):
+def _peer(host, endpoint, path, payload=None, *, timeout=20):
     """Exactly one HTTP attempt. Owner applies terminal checks and dedup."""
     request = urlrequest.Request(host['url'].rstrip('/') + endpoint,
         data=json.dumps(payload).encode() if payload is not None else None,
         headers={'X-HQ-Path': ','.join(path), 'Accept': 'application/json',
                  'Content-Type': 'application/json'}, method='POST' if payload is not None else 'GET')
     try:
-        with urlrequest.build_opener(_NoRedirect()).open(request, timeout=20) as response:
+        with urlrequest.build_opener(_NoRedirect()).open(request, timeout=timeout) as response:
             raw = response.read(8 * 1024 * 1024 + 1)
         if len(raw) > 8 * 1024 * 1024:
             raise FleetError('Peer response exceeded size limit; delivery may be unknown', 502)
@@ -454,6 +454,28 @@ def detail(id, path=()):
             if ended:
                 return ended
         raise
+
+
+def observe(id, after=None, wait=0, path=()):
+    context = _context(path)
+    if (isinstance(wait, bool) or not isinstance(wait, (int, float)) or not 0 <= wait <= 20):
+        raise FleetError('Observer wait must be between 0 and 20 seconds', 400)
+    if after is not None and (not isinstance(after, str) or not 1 <= len(after) <= 64):
+        raise FleetError('Invalid observer cursor', 400)
+    host, identity = _resolve(id)
+    if host.get('url'):
+        query = {'wait': wait}
+        if after is not None:
+            query['after'] = after
+        endpoint = ('/api/sessions/' + urlparse.quote(identity['peer'], safe='')
+                    + '/events?' + urlparse.urlencode(query))
+        result = _peer(host, endpoint, context, timeout=20 + wait)
+        if result.get('session_id') != identity['peer']:
+            raise FleetError('Peer returned a different session identity', 502)
+        return dict(result, session_id=id)
+    if host['id'] != NATIVE_HOST['id']:
+        raise FleetError('Session transport does not support native observations', 409)
+    return dict(native_backend().observe(identity['native'], after, wait), session_id=id)
 
 
 def act(id, action, revision, request_id, text=None, key=None, index=None, path=(), response=None):

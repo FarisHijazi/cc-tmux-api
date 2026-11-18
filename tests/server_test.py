@@ -29,7 +29,7 @@ def pair(client):
 
 def test_unauthorized_clients_cannot_read_or_mutate_sessions(client):
     assert client.get("/api/auth").json() == {"required": True, "authenticated": False}
-    for path in ("/api/sessions", "/api/workers", "/api/push/preferences"):
+    for path in ("/api/sessions", "/api/sessions/opaque/events", "/api/workers", "/api/push/preferences"):
         assert client.get(path).status_code == 401
     assert (
         client.post(
@@ -65,6 +65,140 @@ def test_cross_site_requests_rejected_even_with_valid_credentials(client):
 def test_api_never_cached_and_static_shell_is_public(client):
     assert client.get("/").status_code == 200
     assert client.get("/api/auth").headers["cache-control"] == "no-store"
+
+
+def test_observer_read_keeps_browser_security_and_forwards_cursor(client, monkeypatch):
+    from cc_tmux_api import fleet
+
+    calls = []
+    def observe(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {'session_id': args[0], 'events': [], 'cursor': 'opaque', 'reset': False}
+    monkeypatch.setattr(fleet, 'observe', observe)
+    pair(client)
+    path = '/api/sessions/existing/events?after=opaque&wait=10'
+    response = client.get(path)
+    assert response.status_code == 200
+    assert response.headers['cache-control'] == 'no-store'
+    assert calls == [(('existing', 'opaque', 10), {'path': ()})]
+    assert client.get(path, headers={'Sec-Fetch-Site': 'cross-site'}).status_code == 403
+
+
+def test_observer_capacity_never_starves_native_mod_ingestion(monkeypatch, tmp_path):
+    import asyncio
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from uuid import uuid4
+
+    import httpx
+
+    from cc_tmux_api import fleet, server
+    from cc_tmux_api.native_remote import NativeRemote
+
+    token = 'observer-ingest-test-' + 'x' * 32
+    backend = NativeRemote(tmp_path, token)
+    monkeypatch.setenv('CC_TMUX_STATE_DIR', str(tmp_path))
+    monkeypatch.setenv('CC_TMUX_TOKEN', token)
+    monkeypatch.setenv('CC_TMUX_PUBLIC_URL', 'https://hq.example.test')
+    monkeypatch.setattr(fleet, 'native_backend', lambda: backend)
+    monkeypatch.setattr(server, 'OBSERVER_CAPACITY', 2, raising=False)
+    app = server.create_app()
+    launch = {'x-hq-native-key': token}
+    client = TestClient(app, base_url='https://hq.example.test')
+    sid = client.post('/v1/code/sessions', headers=launch, json={}).json()['session']['id']
+    conversation = str(uuid4())
+    backend._sessions[sid]['claude_session_id'] = conversation
+    backend._save()
+    cursor = backend.observe(sid)['cursor']
+    entered = []
+    guard = threading.Lock()
+
+    def observe(identifier, after, wait, **kwargs):
+        with guard:
+            entered.append(identifier)
+        return backend.observe(sid, after, wait)
+
+    monkeypatch.setattr(fleet, 'observe', observe)
+
+    async def check():
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(max_workers=2))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                base_url='https://hq.example.test', headers={'Authorization': f'Bearer {token}'}) as http:
+            polls = [asyncio.create_task(http.get('/api/sessions/existing/events',
+                params={'after': cursor, 'wait': 0.5})) for _ in range(2)]
+            try:
+                for _ in range(100):
+                    if len(entered) == 2:
+                        break
+                    await asyncio.sleep(0.001)
+                assert len(entered) == 2
+                response = await asyncio.wait_for(http.post('/v1/code/sessions/mod-events',
+                    headers=launch, json={'version': 1, 'claude_session_id': conversation,
+                    'events': [{'id': f'{uuid4()}:1', 'kind': 'turn.start', 'data': {}}]}), 0.2)
+                assert response.status_code == 200
+                assert all(result.json()['events'] for result in await asyncio.gather(*polls))
+            finally:
+                await asyncio.gather(*polls, return_exceptions=True)
+                if hasattr(app.state, 'observers'):
+                    app.state.observers.close()
+    asyncio.run(check())
+
+
+def test_cancelled_observer_keeps_capacity_until_its_thread_finishes(app, monkeypatch):
+    import asyncio
+    import threading
+
+    import httpx
+
+    from cc_tmux_api import fleet, server
+
+    if hasattr(app.state, 'observers'):
+        app.state.observers.close()
+    monkeypatch.setattr(server, 'OBSERVER_CAPACITY', 1, raising=False)
+    app = server.create_app()
+    entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def observe(*args, **kwargs):
+        entered.set()
+        try:
+            assert release.wait(1)
+            return {'session_id': args[0], 'events': [], 'cursor': 'same', 'reset': False}
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(fleet, 'observe', observe)
+
+    async def check():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),
+                base_url='https://hq.example.test',
+                headers={'Authorization': 'Bearer test-pairing-key-with-at-least-32-characters'}) as http:
+            poll = asyncio.create_task(http.get('/api/sessions/existing/events?wait=1'))
+            try:
+                for _ in range(100):
+                    if entered.is_set():
+                        break
+                    await asyncio.sleep(0.001)
+                assert entered.is_set()
+                poll.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await poll
+                rejected = await asyncio.wait_for(http.get('/api/sessions/another/events'), 0.2)
+                assert rejected.status_code == 503
+                assert 'capacity' in rejected.json()['detail'].lower()
+                assert not finished.is_set()
+                release.set()
+                for _ in range(100):
+                    if finished.is_set():
+                        break
+                    await asyncio.sleep(0.001)
+                assert finished.is_set()
+                assert (await http.get('/api/sessions/another/events')).status_code == 200
+            finally:
+                release.set()
+                await asyncio.gather(poll, return_exceptions=True)
+                if hasattr(app.state, 'observers'):
+                    app.state.observers.close()
+    asyncio.run(check())
 
 
 @pytest.mark.parametrize('query,include_ended', [('', True), ('?include_ended=true', True),

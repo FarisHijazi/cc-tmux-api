@@ -17,7 +17,7 @@ import time
 from collections import OrderedDict
 from functools import wraps
 from pathlib import Path
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from anyio import CancelScope
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -46,6 +46,21 @@ REVISION = re.compile(r"[0-9]{1,18}")
 MODEL_COMMAND = re.compile(r"\s*/model\b")
 RATE_WINDOWS = ("five_hour", "seven_day", "seven_day_overage_included")
 UPSTREAM_INJECTABLE = ("user", "control_request", "control_response", "control_cancel_request")
+MAX_OBSERVER_EVENTS = 1024
+MAX_OBSERVER_BYTES = 1024 * 1024
+MAX_OBSERVER_EVENT_BYTES = 64 * 1024
+MAX_MOD_BATCH_BYTES = 256 * 1024
+MAX_MOD_BATCH_EVENTS = 128
+MAX_MOD_PRODUCERS = 32
+MAX_MOD_RECEIPTS = 128
+MOD_KINDS = frozenset(("prompt.submit", "turn.start", "turn.step", "turn.complete",
+                       "tool.call", "tool.result", "session.append", "session.end", "gap"))
+CANONICAL_UUID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+OBSERVER_CURSOR = re.compile(rf"({CANONICAL_UUID}):([0-9]{{1,18}})")
+MOD_EVENT_ID = re.compile(rf"({CANONICAL_UUID}):([1-9][0-9]{{0,15}})")
+CONVERSATION_FIELDS = ("claude_session_id", "messages", "streaming", "pending",
+                       "pending_requests", "controls", "meta", "external_metadata",
+                       "revision", "input_revision")
 
 
 def _size(value):
@@ -95,6 +110,7 @@ class NativeRemote:
             raise ValueError("CC_TMUX_NATIVE_TOKEN must contain at least 32 characters")
         self._token = token
         self._lock = threading.RLock()
+        self._observations = threading.Condition(self._lock)
         self._streams = {}
         self._computer_use_dialogs = False
         self._path = Path(state_dir) / "native-remote.json"
@@ -230,6 +246,239 @@ class NativeRemote:
         with os.fdopen(fd, "w") as out:
             out.write(json.dumps({"version": 1, "sessions": self._sessions}))
         os.replace(temporary, self._path)
+        with self._observations:
+            self._observations.notify_all()
+
+    @staticmethod
+    def _observer_state(session):
+        return session.get("observer") or {
+            "epoch": str(uuid5(NAMESPACE_URL, "cc-hq-observer-v1:" + session["id"])),
+            "sequence": 0, "events": [], "bytes": 0,
+        }
+
+    def _observe_event(self, session, source, kind, data, event_id=None):
+        observer = session.setdefault("observer", self._observer_state(session))
+        observer["sequence"] += 1
+        cursor = f"{observer['epoch']}:{observer['sequence']}"
+        event = {"cursor": cursor, "source": source, "kind": kind, "data": copy.deepcopy(data)}
+        if event_id is not None:
+            event["id"] = event_id
+        reason = "invalid_kind" if not isinstance(kind, str) or not kind else None
+        try:
+            encoded = json.dumps(event, ensure_ascii=False, allow_nan=False).encode()
+            reason = reason or ("event_too_large" if len(encoded) > MAX_OBSERVER_EVENT_BYTES else None)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            reason = "invalid_json"
+        if reason:
+            event = {"cursor": cursor, "source": source, "kind": "gap",
+                     "data": {"reason": reason,
+                              "kind": str(kind).encode("utf-8", "replace").decode()[:128]}}
+        events = observer["events"]
+        events.append(event)
+        observer["bytes"] += _size(event)
+        while len(events) > MAX_OBSERVER_EVENTS or observer["bytes"] > MAX_OBSERVER_BYTES:
+            observer["bytes"] -= _size(events.pop(0))
+        return cursor
+
+    def observe(self, sid, after=None, wait=0):
+        """Read the owner's bounded observation tail; never touch worker state or replay input."""
+        from .fleet import FleetError
+
+        if (isinstance(wait, bool) or not isinstance(wait, (int, float))
+                or not 0 <= wait <= 20):
+            raise FleetError("Observer wait must be between 0 and 20 seconds", 400)
+        parsed = None
+        if after is not None:
+            parsed = OBSERVER_CURSOR.fullmatch(after) if isinstance(after, str) else None
+            if parsed is None:
+                raise FleetError("Invalid observer cursor", 400)
+        deadline = time.monotonic() + wait
+        with self._observations:
+            while True:
+                session = self._sessions.get(sid)
+                if session is None:
+                    raise FleetError("Unknown native session", 404)
+                observer = self._observer_state(session)
+                sequence = observer["sequence"]
+                cursor = f"{observer['epoch']}:{sequence}"
+                response = {"session_id": sid, "events": [], "cursor": cursor, "reset": False}
+                events = observer["events"]
+                if parsed is not None:
+                    position = int(parsed[2])
+                    reason = None
+                    if parsed[1] != observer["epoch"] or position > sequence:
+                        reason = "reset"
+                    elif position < sequence - len(events):
+                        reason = "expired"
+                    if reason:
+                        return dict(response, reset=True, gap={"reason": reason})
+                    response["events"] = copy.deepcopy(events[len(events) - (sequence - position):])
+                else:
+                    response["events"] = copy.deepcopy(events)
+                remaining = deadline - time.monotonic()
+                if response["events"] or parsed is None or remaining <= 0 or session["archived"]:
+                    return response
+                self._observations.wait(remaining)
+
+    @staticmethod
+    def _validated_mod_events(body):
+        required = {"version", "claude_session_id", "events"}
+        optional = {"native_session_id", "previous_claude_session_id"}
+        if (not required <= set(body) or set(body) - required - optional
+                or type(body.get("version")) is not int or body["version"] != 1
+                or not isinstance(body.get("claude_session_id"), str)
+                or not re.fullmatch(CANONICAL_UUID, body["claude_session_id"])):
+            raise HTTPException(400, "Invalid Mod event envelope")
+        if "native_session_id" in body and (
+                not isinstance(body["native_session_id"], str)
+                or not re.fullmatch(r"cse_[0-9a-f]{32}", body["native_session_id"])):
+            raise HTTPException(400, "Invalid explicit native session identity")
+        if "previous_claude_session_id" in body and (
+                "native_session_id" not in body
+                or not isinstance(body["previous_claude_session_id"], str)
+                or not re.fullmatch(CANONICAL_UUID, body["previous_claude_session_id"])):
+            raise HTTPException(400, "Invalid previous Claude session identity")
+        events = body["events"]
+        if not isinstance(events, list) or not 1 <= len(events) <= MAX_MOD_BATCH_EVENTS:
+            raise HTTPException(400, "Invalid Mod event batch")
+        try:
+            encoded = json.dumps(body, ensure_ascii=False, allow_nan=False).encode()
+        except (ValueError, TypeError, UnicodeError, RecursionError) as exc:
+            raise HTTPException(400, "Mod events must contain finite JSON") from exc
+        if len(encoded) > MAX_MOD_BATCH_BYTES:
+            raise HTTPException(413, "Mod event batch exceeds 256 KiB")
+        validated = []
+        for event in events:
+            if (not isinstance(event, dict) or set(event) != {"id", "kind", "data"}
+                    or not isinstance(event["kind"], str) or event["kind"] not in MOD_KINDS
+                    or not isinstance(event["id"], str)):
+                raise HTTPException(400, "Invalid Mod event")
+            match = MOD_EVENT_ID.fullmatch(event["id"])
+            if match is None or int(match[2]) > 9007199254740991:
+                raise HTTPException(400, "Mod event ID must be a producer UUID and sequence")
+            pending = [(event["data"], 0)]
+            while pending:
+                value, depth = pending.pop()
+                if depth > 32:
+                    raise HTTPException(400, "Mod event nesting exceeds 32 levels")
+                if isinstance(value, (list, dict)):
+                    pending.extend((child, depth + 1) for child in
+                                   (value.values() if isinstance(value, dict) else value))
+            canonical = json.dumps(event, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":"), allow_nan=False)
+            if len(canonical.encode()) > MAX_OBSERVER_EVENT_BYTES - 256:
+                raise HTTPException(413, "Mod event exceeds observation storage limit")
+            validated.append((event, match[1], int(match[2]), _digest(canonical)))
+        return validated
+
+    def accept_mod_events(self, body):
+        validated = self._validated_mod_events(body)
+        with self._lock:
+            conversation = body["claude_session_id"]
+            matches = [session for session in self._sessions.values()
+                       if not session["archived"]
+                       and session.get("claude_session_id") == conversation]
+            if "native_session_id" in body:
+                session = self._sessions.get(body["native_session_id"])
+                if session is None or session["archived"]:
+                    raise HTTPException(404, "Explicit native session is not registered with this owner")
+                if any(match is not session for match in matches):
+                    raise HTTPException(409, "Claude session identity is ambiguous")
+                current = session.get("claude_session_id")
+                if current != conversation:
+                    if current not in (None, session["id"]) and (
+                            not isinstance(current, str) or not re.fullmatch(CANONICAL_UUID, current)
+                            or body.get("previous_claude_session_id") != current):
+                        raise HTTPException(409, "Claude session identity changed; binding is stale")
+                    if any(producer in session.get("mod_producers", {})
+                           for _, producer, _, _ in validated):
+                        raise HTTPException(409, "An old Mod producer cannot rebind the native session")
+            else:
+                if not matches:
+                    raise HTTPException(404, "Claude session is not registered with this native owner")
+                if len(matches) != 1:
+                    raise HTTPException(409, "Claude session identity is ambiguous")
+                session = matches[0]
+            candidate = copy.deepcopy(session)
+            producers = candidate.setdefault("mod_producers", {})
+            results = []
+            changed = session.get("claude_session_id") != conversation
+            for producer in producers.values():
+                if "claude_session_id" not in producer:
+                    # Older receipts belong to the identity before this batch,
+                    # never to whichever conversation a later binding selects.
+                    producer["claude_session_id"] = session.get("claude_session_id")
+                    changed = True
+            for event, producer_id, sequence, digest in validated:
+                producer = producers.get(producer_id)
+                if producer is None:
+                    if len(producers) >= MAX_MOD_PRODUCERS:
+                        raise HTTPException(409, "Mod producer capacity reached")
+                    producer = producers[producer_id] = {
+                        "sequence": 0, "receipts": {}, "claude_session_id": conversation}
+                elif producer["claude_session_id"] != conversation:
+                    raise HTTPException(409, "Mod producer belongs to a different Claude session")
+                receipts = producer["receipts"]
+                receipt = receipts.get(str(sequence))
+                if sequence <= producer["sequence"]:
+                    if receipt is None:
+                        raise HTTPException(409, "Mod deduplication receipt expired; do not resend")
+                    if receipt["digest"] != digest:
+                        raise HTTPException(409, "Mod event ID already has a different payload")
+                    results.append({"id": event["id"], "duplicate": True,
+                                    "cursor": receipt["cursor"]})
+                    continue
+                if sequence != producer["sequence"] + 1:
+                    raise HTTPException(409, "Mod event sequence must be consecutive")
+                cursor = self._observe_event(candidate, "mod", event["kind"], event["data"], event["id"])
+                receipts[str(sequence)] = {"digest": digest, "cursor": cursor}
+                producer["sequence"] = sequence
+                while len(receipts) > MAX_MOD_RECEIPTS:
+                    receipts.pop(next(iter(receipts)))
+                results.append({"id": event["id"], "duplicate": False, "cursor": cursor})
+                changed = True
+            if changed:
+                # Keep the live session object: active stream handlers retain its identity.
+                if self._bind_conversation(candidate, conversation, candidate["revision"] + 1):
+                    candidate["revision"] += 1
+                fields = ("observer", "mod_producers", *CONVERSATION_FIELDS)
+                missing = object()
+                previous = {key: session.get(key, missing) for key in fields}
+                for key in fields:
+                    if key in candidate:
+                        session[key] = candidate[key]
+                    else:
+                        session.pop(key, None)
+                try:
+                    self._save()
+                except BaseException:
+                    for key, value in previous.items():
+                        if value is missing:
+                            session.pop(key, None)
+                        else:
+                            session[key] = value
+                    raise
+            state = self._observer_state(session)
+            return {"session_id": session["id"], "claude_session_id": body["claude_session_id"],
+                    "results": results,
+                    "cursor": f"{state['epoch']}:{state['sequence']}"}
+
+    @staticmethod
+    def _bind_conversation(session, conversation, next_revision):
+        """Reset conversation caches on rotation, retaining the native transport."""
+        current = session.get("claude_session_id")
+        rotated = (current != conversation and isinstance(current, str)
+                   and re.fullmatch(CANONICAL_UUID, current) is not None)
+        if rotated:
+            session.update(messages=[], streaming=None, pending_requests={}, controls={})
+            session.pop("pending", None)
+            for key in ("context_tokens", "control_error"):
+                session.get("meta", {}).pop(key, None)
+            for key in ("context_usage", "task_summary"):
+                session.get("external_metadata", {}).pop(key, None)
+            session["input_revision"] = next_revision
+        session["claude_session_id"] = conversation
+        return rotated
 
     def _get(self, sid):
         if sid not in self._sessions:
@@ -260,12 +509,12 @@ class NativeRemote:
         if type(body.get("worker_epoch")) is not int or body["worker_epoch"] != session["epoch"]:
             raise HTTPException(409, {"type": "epoch_conflict", "actual_epoch": session["epoch"]})
 
-    async def _body(self, request):
+    async def _body(self, request, limit=MAX_BODY):
         chunks = []
         total = 0
         async for chunk in request.stream():
             total += len(chunk)
-            if total > MAX_BODY:
+            if total > limit:
                 raise HTTPException(413, "Native request too large")
             chunks.append(chunk)
         try:
@@ -725,8 +974,12 @@ class NativeRemote:
 
     def _metadata(self, session, payload):
         meta = session.setdefault("meta", {})
-        text = lambda value, limit=128: value[:limit] if isinstance(value, str) else None
-        number = lambda value: value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+        def text(value, limit=128):
+            return value[:limit] if isinstance(value, str) else None
+
+        def number(value):
+            return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
         kind = payload.get("type")
         if kind == "system" and payload.get("subtype") in ("init", "status"):
             for key, field in (("model", "model"), ("permission_mode", "permissionMode")):
@@ -872,12 +1125,18 @@ class NativeRemote:
         value = item.get("event_id") or payload.get("uuid")
         return value if isinstance(value, str) else None
 
-    def _ingest(self, session, payload):
+    def _ingest(self, session, payload, event_id=None):
         if not isinstance(payload, dict):
             return
+        kind = payload.get("type")
+        if kind == "system" and payload.get("subtype") == "init":
+            # Current Remote Control substitutes a cse_ bridge placeholder. Only
+            # an actual UUID can rotate history; clear before ingesting new data.
+            value = payload.get("session_id")
+            if isinstance(value, str) and re.fullmatch(CANONICAL_UUID, value):
+                self._bind_conversation(session, value, session["revision"] + 1)
         self._message(session, payload)
         self._metadata(session, payload)
-        kind = payload.get("type")
         if kind == "stream_event":
             self._stream(session, payload)
         for incoming in self._incoming_requests(session, payload):
@@ -903,12 +1162,11 @@ class NativeRemote:
             self._pending(session).pop(payload["response"]["request_id"], None)
         elif kind == "control_cancel_request":
             self._pending(session).pop(payload.get("request_id"), None)
-        elif kind == "system" and payload.get("subtype") == "init":
-            session["claude_session_id"] = payload.get("session_id", session["id"])
         elif kind == "result":
             session["worker_status"] = "idle"
             session["streaming"] = None
         session["revision"] += 1
+        self._observe_event(session, "native", kind, payload, event_id)
 
     def replay(self, sid, cursor):
         """Snapshot only this session's replay lane; retained gaps fail explicitly."""
@@ -936,6 +1194,15 @@ class NativeRemote:
 
         async def worker_body(request: Request):
             return await self._body(request) if request.method != "GET" else {}
+
+        async def mod_body(request: Request):
+            self._launch_auth(request)
+            return await self._body(request, MAX_MOD_BATCH_BYTES)
+
+        @router.post("/mod-events")
+        @_offload
+        def mod_events(body: dict = Depends(mod_body)):
+            return self.accept_mod_events(body)
 
         @router.post("")
         @_offload
@@ -1144,12 +1411,20 @@ class NativeRemote:
                         )
                     ):
                         raise HTTPException(400, "Invalid native event batch")
+                    previous = copy.deepcopy(session)
                     seen = OrderedDict((key, True) for key in session["seen_events"])
                     pending = copy.deepcopy(self._pending(session))
+                    preview = {"claude_session_id": session.get("claude_session_id"),
+                               "pending_requests": pending}
                     for item in events:
                         if self._event_identity(item) in seen:
                             continue
                         payload = item["payload"]
+                        if payload.get("type") == "system" and payload.get("subtype") == "init":
+                            value = payload.get("session_id")
+                            if isinstance(value, str) and re.fullmatch(CANONICAL_UUID, value):
+                                self._bind_conversation(preview, value, session["revision"] + 1)
+                                pending = preview["pending_requests"]
                         for incoming in self._incoming_requests(session, payload):
                             pending[incoming["request_id"]] = incoming
                         if payload.get("type") == "control_cancel_request":
@@ -1159,18 +1434,23 @@ class NativeRemote:
                     if len(pending) > 64 or _size(pending) > MAX_PENDING_BYTES:
                         raise HTTPException(413, "Too many pending native permissions")
                     results = []
-                    for item in events:
-                        payload = item["payload"]
-                        eid = self._event_identity(item)
-                        duplicate = eid in seen if isinstance(eid, str) else False
-                        if not duplicate:
-                            self._ingest(session, payload)
-                            if isinstance(eid, str):
-                                seen[eid] = True
-                        results.append({"event_id": eid or str(uuid4()), "duplicate": duplicate})
-                    session["seen_events"] = list(seen)[-MAX_EVENTS:]
-                    self._touch(session)
-                    self._save()
+                    try:
+                        for item in events:
+                            payload = item["payload"]
+                            eid = self._event_identity(item)
+                            duplicate = eid in seen if isinstance(eid, str) else False
+                            if not duplicate:
+                                self._ingest(session, payload, eid)
+                                if isinstance(eid, str):
+                                    seen[eid] = True
+                            results.append({"event_id": eid or str(uuid4()), "duplicate": duplicate})
+                        session["seen_events"] = list(seen)[-MAX_EVENTS:]
+                        self._touch(session)
+                        self._save()
+                    except BaseException:
+                        session.clear()
+                        session.update(previous)
+                        raise
                     fresh = [item for item, r in zip(events, results) if not r["duplicate"]]
                     if fresh:
                         self._mirror(session, operation, {"events": fresh})
