@@ -88,7 +88,7 @@ try {
       } else if (url.pathname.startsWith('/api/sessions/')) {
         if (failDetail) return route.fulfill({status:503,json:{detail:'Host cannot be reached'}});
         const target = extraSessions.find(s => s.id === decodeURIComponent(url.pathname.slice('/api/sessions/'.length))) || session;
-        data = target === session && (session.lifecycle === undefined || session.lifecycle === 'alive') ? {...session, revision:String(revision), menu, tail:menu?.kind === 'review' ? reviewTail : 'Ready for input',messages:[{role:'assistant',text:messageText}]} : {...target,revision:String(revision),tail:target.tail || '',messages:[]};
+        data = target === session && (session.lifecycle === undefined || session.lifecycle === 'alive') ? {...session, revision:String(revision), menu, tail:menu?.kind === 'review' ? reviewTail : 'Ready for input',messages:[{role:'assistant',text:messageText}]} : {...target,revision:String(revision),tail:target.tail || '',messages:target.messages || []};
       }
       else if (url.pathname === '/api/push/preferences') data = {muted:[]};
       else if (url.pathname === '/api/push') data = {available:false,public_key:'',reason:'Not configured'};
@@ -543,6 +543,33 @@ try {
     await cu.getByRole('button',{name:'Try again',exact:true}).click();
     await page.waitForFunction(() => !document.querySelector('.native-control'));
     assert.deepEqual(actions.at(-1).response,{request_id:'computer-tcc',behavior:'completed'});
+    nativeSession.transport = 'codex';
+    nativeSession.messages = [{id:'codex-item',role:'assistant',text:'Codex is ready.'}];
+    nativeSession.capabilities = {send:false,interrupt:false,respond:false,set_model:false};
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    await page.getByText('Codex is ready.',{exact:true}).waitFor();
+    assert.equal(await page.locator('.message-author').textContent(),'Codex');
+    assert.equal(await page.getByRole('tab',{name:'Terminal',exact:true}).count(),0);
+    assert.equal(await page.getByText('Keyboard controls',{exact:true}).count(),0);
+    assert.equal(await page.locator('.native-bar').count(),0,'Codex must not expose Claude model or Remote Control links');
+    assert.equal(await page.getByRole('button',{name:'Interrupt',exact:true}).isDisabled(),true);
+    await page.getByRole('textbox',{name:'Message this session',exact:true}).fill('Codex draft');
+    assert.equal(await page.getByRole('button',{name:'Send message',exact:true}).isDisabled(),true);
+    const beforeDisabledCodex = actionCount;
+    await page.getByRole('textbox',{name:'Message this session',exact:true}).press('Control+Enter');
+    assert.equal(actionCount,beforeDisabledCodex,'Keyboard submit must preserve the disabled send capability');
+    nativeSession.native_control = {request_id:'codex-approval',tool_name:'Command',input:{command:'pwd'}};
+    nativeSession.capabilities.respond = true;
+    nativeSession.capabilities.interrupt = true;
+    await page.getByRole('button',{name:'Refresh session',exact:true}).click();
+    await page.getByRole('button',{name:'Deny',exact:true}).click();
+    await page.waitForFunction(() => !document.querySelector('.native-control'));
+    assert.equal(actions.at(-1).response.request_id,'codex-approval');
+    await page.getByRole('button',{name:'Interrupt',exact:true}).click();
+    await page.getByRole('button',{name:'Confirm interrupt',exact:true}).click();
+    await page.getByText('Control sent. Screen refreshed.',{exact:true}).waitFor();
+    assert.equal(actions.at(-1).action,'interrupt');
+    assert.equal(actions.at(-1).key,undefined);
     console.log(`PASS ${width}px: existing HQ contracts and native permission/answers, capability gating, interrupt, drafts, failed-send retention`);
     await context.close();
   }

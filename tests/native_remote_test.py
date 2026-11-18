@@ -1,15 +1,166 @@
 """Native RC v2 HTTP contract and guarded per-session action tests."""
 
+import asyncio
 import copy
 import json
+import threading
 import time
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from cc_tmux_api.fleet import FleetError
 from cc_tmux_api.native_remote import MAX_EVENTS, NativeRemote, _frame, get_backend
+
+
+def test_registry_save_preserves_exact_format_and_atomic_private_replacement(tmp_path, monkeypatch):
+    import os
+
+    backend = NativeRemote(tmp_path, "test-" + "x" * 40)
+    backend._sessions = {"test-session": {"text": "Unicode: مرحبا", "events": [1, None, True]}}
+    previous = '{"version": 1, "sessions": {}}'
+    backend._path.write_text(previous)
+    expected = json.dumps({"version": 1, "sessions": backend._sessions})
+    replace = os.replace
+    replacements = []
+
+    def verify_atomic(source, destination):
+        assert backend._path.read_text() == previous
+        assert source.read_text() == expected
+        assert source.stat().st_mode & 0o777 == 0o600
+        replacements.append((source, destination))
+        replace(source, destination)
+
+    monkeypatch.setattr(os, "replace", verify_atomic)
+    backend._save()
+    assert replacements == [(backend._path.with_suffix(".tmp"), backend._path)]
+    assert backend._path.read_text() == expected
+    assert backend._path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("method,suffix", [
+    ("POST", ""), ("POST", "/{sid}/bridge"), ("GET", "/{sid}/worker"),
+    ("PUT", "/{sid}/worker"), ("POST", "/{sid}/worker/heartbeat"),
+    ("GET", "/{sid}"), ("PATCH", "/{sid}"), ("POST", "/{sid}/archive"),
+])
+def test_native_lock_wait_leaves_http_event_loop_available(native, method, suffix):
+    backend, client, launch = native
+    sid, auth, epoch = register(native)
+    acquired, release = threading.Event(), threading.Event()
+
+    @client.app.get("/health")
+    async def health():
+        return {"ok": True}
+
+    def locked_writer():
+        with backend._lock:
+            acquired.set()
+            release.wait(3)
+
+    async def exercise():
+        writer = threading.Thread(target=locked_writer)
+        writer.start()
+        assert acquired.wait(1)
+        started = time.monotonic()
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app), base_url="http://testserver"
+        ) as http:
+            request = asyncio.create_task(http.request(
+                method, "/v1/code/sessions" + suffix.format(sid=sid),
+                headers={**launch, **auth}, json={"worker_epoch": epoch, "title": "Updated"},
+            ))
+            try:
+                await asyncio.sleep(0.03)
+                response = await http.get("/health")
+                assert response.status_code == 200
+                assert time.monotonic() - started < 1
+                assert not request.done()
+            finally:
+                release.set()
+                writer.join(1)
+            assert (await request).status_code == 200
+
+    asyncio.run(exercise())
+
+
+def test_native_save_finishes_before_ack_without_blocking_event_loop(native, monkeypatch):
+    backend, client, launch = native
+    entered, release = threading.Event(), threading.Event()
+    save = backend._save
+
+    def slow_save():
+        entered.set()
+        release.wait(3)
+        save()
+
+    monkeypatch.setattr(backend, "_save", slow_save)
+
+    async def exercise():
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app), base_url="http://testserver"
+        ) as http:
+            started = time.monotonic()
+            request = asyncio.create_task(http.post("/v1/code/sessions", headers=launch, json={}))
+            try:
+                assert await asyncio.to_thread(entered.wait, 1)
+                assert time.monotonic() - started < 1
+                assert not request.done()
+                assert not backend._path.exists()
+            finally:
+                release.set()
+            response = await request
+            assert response.status_code == 200
+            assert response.json()["session"]["id"] in json.loads(backend._path.read_text())["sessions"]
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize("cancel_registration", [False, True])
+def test_sse_poll_and_cleanup_wait_off_event_loop(native, cancel_registration):
+    from starlette.requests import Request
+
+    backend, _, _ = native
+    sid, auth, _ = register(native)
+    endpoint = next(route.endpoint for route in backend.router().routes
+                    if route.path.endswith("/worker/events/stream"))
+    acquired, release = threading.Event(), threading.Event()
+
+    def locked_writer():
+        with backend._lock:
+            acquired.set()
+            release.wait(3)
+
+    async def receive():
+        await asyncio.sleep(10)
+
+    async def exercise():
+        scope = {"type": "http", "method": "GET", "path": "/", "query_string": b"",
+                 "headers": [(b"authorization", auth["Authorization"].encode())]}
+        response = await endpoint(sid, Request(scope, receive))
+        if not cancel_registration:
+            assert await anext(response.body_iterator) == ": connected\n\n"
+        writer = threading.Thread(target=locked_writer)
+        writer.start()
+        assert acquired.wait(1)
+        started = time.monotonic()
+        poll = asyncio.create_task(anext(response.body_iterator))
+        try:
+            await asyncio.sleep(0.03)
+            assert time.monotonic() - started < 1
+            assert not poll.done()
+            poll.cancel()
+            await asyncio.sleep(0.03)
+            assert time.monotonic() - started < 1
+        finally:
+            release.set()
+            writer.join(1)
+        with pytest.raises(asyncio.CancelledError):
+            await poll
+        assert sid not in backend._streams
+
+    asyncio.run(exercise())
 
 
 def computer_use_request(request_id="computer-consent"):
@@ -159,6 +310,8 @@ def test_send_replay_isolation_and_interrupt(native):
     assert receipt["delivery"] == "queued"
     assert backend.replay(other, 0) == []
     events = backend.replay(sid, 0)
+    assert receipt["source_message_id"] == events[0]["payload"]["uuid"]
+    assert backend.detail(sid)["messages"][0]["id"] == receipt["source_message_id"]
     assert events[0]["payload"]["message"]["content"][0]["text"] == "Hello native"
     assert events[0]["payload"]["client_platform"] == "web_claude_ai"
     assert "inbound_origin" not in events[0]["payload"]
@@ -225,6 +378,8 @@ def test_permission_response_matches_exact_pending_request(native):
 def test_disconnect_is_unreachable_and_only_archive_ends(native):
     backend, client, launch = native
     sid, auth, epoch = register(native)
+    assert backend.detail(sid)['provider'] == 'claude'
+    assert backend.detail(sid)['transport'] == 'native'
     assert backend.detail(sid)["lifecycle"] == "unreachable"
     connected(backend, sid)
     assert backend.detail(sid)["lifecycle"] == "alive"
@@ -917,8 +1072,12 @@ def test_streaming_text_and_session_metadata(native):
     sid, auth, epoch = register(native)
     connected(backend, sid)
 
+    event_index = 0
+
     def stream(event):
-        return {"type": "stream_event", "uuid": str(time.time_ns()), "event": event}
+        nonlocal event_index
+        event_index += 1
+        return {"type": "stream_event", "uuid": f"stream-{event_index}", "event": event}
 
     events = [
         {"type": "system", "subtype": "init", "uuid": "init", "model": "claude-sonnet-5-5",

@@ -231,8 +231,8 @@ def create_app() -> FastAPI:
         return {"ok": True}
 
     @app.get("/api/sessions")
-    def sessions_list(request: Request):
-        return fleet.snapshot(path=cascade_path(request))
+    def sessions_list(request: Request, include_ended: bool = True):
+        return fleet.snapshot(path=cascade_path(request), include_ended=include_ended)
 
     @app.get("/api/sessions/{session_id}")
     def session_detail(session_id: str, request: Request):

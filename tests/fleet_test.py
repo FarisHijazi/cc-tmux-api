@@ -13,6 +13,8 @@ from cc_tmux_api import fleet
 from cc_tmux_api import fleet_probe as probe
 
 REAL_PROBE = fleet._probe
+REAL_NOTIFY_LIBRARY = probe.notify_library
+REAL_CLI_ACTIVITY = probe.cli_activity
 
 SID = '11111111-2222-4333-8444-555555555555'
 OTHER = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
@@ -60,6 +62,7 @@ def isolated(monkeypatch):
     monkeypatch.setattr(probe, 'run', forbidden)
     monkeypatch.setattr(fleet, '_probe', forbidden)
     monkeypatch.setattr(probe, 'notify_library', lambda: None)
+    monkeypatch.setattr(probe, 'cli_activity', lambda *_: None)
     monkeypatch.setattr(fleet, 'notify_library', lambda: None)
     monkeypatch.setattr(probe.shutil, 'which', lambda _: None)
 
@@ -283,6 +286,100 @@ def test_background_target_refused(monkeypatch):
         probe.perform(dict(identity=IDENTITY, revision='r1', action='key', key='Enter'))
 
 
+def animated_item(tail, status='working'):
+    result = item(tail)
+    borders = [index for index, line in enumerate(tail.splitlines()) if line.startswith('───')]
+    result['_pane'].update(pane_id='%121', pane_current_command='claude', cursor_x='2',
+                           cursor_y=str(borders[-2] + 1) if len(borders) > 1 else '0')
+    result['status'] = status
+    result['revision'] = probe.screen_revision(IDENTITY, result['_pane'], tail, result['menu'], status)
+    return result
+
+
+@pytest.mark.parametrize('action,key', [('send', None), ('interrupt', None), ('key', 'C-c')])
+def test_working_control_allows_streaming_output_before_and_during_validation(monkeypatch, action, key):
+    # Real Claude streaming layout: no spinner while text grows, and the status
+    # line's elapsed time changes independently of the empty input box.
+    screens = [animated_item(f'{output}\n────────\n❯ \n────────\nlast {elapsed}s ago\n')
+               for output, elapsed in [('  75.', 39), ('  75. A new cloud.\n  76.', 40), ('  76. Another cloud.', 41)]]
+    results = iter([[screens[1]], [screens[2]]])
+    monkeypatch.setattr(probe, 'discover', lambda _: next(results))
+    writes = []
+    monkeypatch.setattr(probe, 'tmux', lambda *args, **kwargs: writes.append(args))
+    assert probe.perform(dict(identity=IDENTITY, revision=screens[0]['revision'], action=action,
+                              key=key, text='Next task', request_id='animated'))['ok']
+    assert writes == ([('send-keys', '-t', '%121', '-l', '--', 'Next task'),
+                       ('send-keys', '-t', '%121', 'Enter')] if action == 'send' else
+                      [('send-keys', '-t', '%121', 'C-c')])
+
+
+@pytest.mark.parametrize('change', ['prompt', 'menu', 'permission', 'cursor', 'cursor_row', 'identity',
+                                  'copy_mode', 'idle', 'waiting', 'background'])
+@pytest.mark.parametrize('action,key', [('send', None), ('interrupt', None), ('key', 'C-c')])
+def test_working_control_does_not_hide_input_or_target_changes(monkeypatch, change, action, key):
+    tail = 'Answer unchanged\n✻ Thinking… (1s)\n────────\n❯ \n────────\n'
+    old = animated_item(tail)
+    new = animated_item(tail.replace('✻ Thinking… (1s)', '✢ Thinking… (2s)'))
+    if change in ('prompt', 'menu', 'permission'):
+        new_tail = {'prompt': new['tail'].replace('❯ ', '❯ human draft'),
+                    'menu': SINGLE,
+                    'permission': new['tail'] + 'Do you want to proceed?\n❯ 1. Yes\n  2. No\nEsc to cancel\n'}[change]
+        new = animated_item(new_tail, 'waiting' if change in ('menu', 'permission') else 'working')
+    elif change == 'background':
+        new['_proc']['state'] = 'S'
+    else:
+        if change == 'identity':
+            new['identity'] = [*IDENTITY[:-1], 'new process birth']
+        elif change in ('idle', 'waiting'):
+            new['status'] = change
+        else:
+            new['_pane'][{'cursor': 'cursor_x', 'cursor_row': 'cursor_y', 'copy_mode': 'pane_in_mode'}[change]] = '1'
+        new['revision'] = probe.screen_revision(new['identity'], new['_pane'], new['tail'], new['menu'], new['status'])
+    results = iter([[old], [new]])
+    monkeypatch.setattr(probe, 'discover', lambda _: next(results))
+    with pytest.raises(probe.ProbeError):
+        probe.perform(dict(identity=IDENTITY, revision=old['revision'], action=action,
+                           key=key, text='Next task', request_id='changed'))
+
+
+@pytest.mark.parametrize('action', ['type', 'key', 'select', 'submit'])
+def test_non_send_actions_keep_exact_screen_revision(action):
+    first = animated_item('✻ Thinking… (1s)\n────────\n❯ \n────────\n')
+    second = animated_item('✢ Thinking… (2s)\n────────\n❯ \n────────\n')
+    assert not probe.same_revision(first['revision'], second['revision'], action)
+
+
+@pytest.mark.parametrize('action,key', [('send', None), ('interrupt', None), ('key', 'C-c')])
+def test_working_control_revalidates_canonical_empty_prompt(monkeypatch, action, key):
+    observed = animated_item('Streaming text\n────────\n❯ \n────────\n')
+    monkeypatch.setattr(probe, 'discover', lambda _: [observed])
+    empty = iter([True, False])
+    monkeypatch.setattr(probe, 'empty_prompt', lambda _: next(empty))
+    with pytest.raises(probe.ProbeError, match='Input changed during validation; refresh before acting'):
+        probe.perform(dict(identity=IDENTITY, revision=observed['revision'], action=action,
+                           key=key, text='Next task', request_id='input-race'))
+
+
+def test_working_revision_uses_canonical_empty_semantics_for_placeholders(monkeypatch):
+    seen = []
+    def canonical_empty(value):
+        seen.append(value['tail'])
+        return True
+    monkeypatch.setattr(probe, 'empty_prompt', canonical_empty)
+    plain = animated_item('Streaming\n────────\n❯ \n────────\n')
+    hinted = animated_item('More streaming\n────────\n❯ Press up to edit queued messages\n────────\n')
+    assert probe.same_revision(hinted['revision'], plain['revision'], 'interrupt')
+    assert len(seen) == 2
+
+
+@pytest.mark.parametrize('draft', ['human draft', '/compact'])
+def test_working_revision_never_treats_literal_drafts_as_placeholder(draft):
+    old = animated_item('Streaming\n────────\n❯ \n────────\n')
+    new = animated_item(f'Streaming\n────────\n❯ {draft}\n────────\n')
+    assert ':w:' not in new['revision']
+    assert not probe.same_revision(new['revision'], old['revision'], 'interrupt')
+
+
 def test_duplicate_concurrent_action_sent_once_and_conflict(monkeypatch):
     calls = []
     def fake(host, request):
@@ -334,6 +431,28 @@ def test_transcript_tail_bounded(tmp_path):
     path = tmp_path / 'large.jsonl'
     path.write_bytes(b'x' * (probe.LIMIT + 100) + b'\n{"type":"user"}\n')
     assert probe.read_tail(path) == '{"type":"user"}\n'
+
+
+def test_transcript_preserves_distinct_source_ids_and_block_positions(tmp_path, monkeypatch):
+    path = tmp_path / f'{SID}.jsonl'
+    monkeypatch.setattr(probe, 'transcript_path', lambda *_: path)
+    entries = [
+        {'type': 'user', 'uuid': 'user-a', 'message': {'content': 'same text'}},
+        {'type': 'user', 'uuid': 'user-b', 'message': {'content': 'same text'}},
+        {'type': 'assistant', 'uuid': 'row-a', 'message': {'id': 'provider-a', 'content': [
+            {'type': 'text', 'text': 'first'}, {'type': 'tool_use', 'id': 'tool-a'},
+            {'type': 'text', 'text': 'second'}]}},
+        {'type': 'assistant', 'message': {'id': 'provider-b', 'content': [{'type': 'text', 'text': 'growing'}]}},
+    ]
+    path.write_text('\n'.join(map(json.dumps, entries)))
+    first = probe.transcript_messages({'sid': SID}, '/workspace')
+    assert [message['id'] for message in first] == ['user-a', 'user-b', 'row-a:0', 'row-a:2', 'provider-b:0']
+    entries[-1]['message']['content'][0]['text'] = 'growing answer'
+    entries[-1]['message']['content'].append({'type': 'text', 'text': 'new block'})
+    path.write_text('\n'.join(map(json.dumps, entries)))
+    updated = probe.transcript_messages({'sid': SID}, '/workspace')
+    assert updated[-2:] == [{'role': 'assistant', 'id': 'provider-b:0', 'text': 'growing answer'},
+                            {'role': 'assistant', 'id': 'provider-b:1', 'text': 'new block'}]
 
 
 @pytest.mark.parametrize('metadata', [
@@ -650,6 +769,209 @@ def test_current_work_suppresses_opaque_tab_outcome():
     assert result == {'status_emoji': None, 'status_label': None, 'notification_eligible': False}
 
 
+@pytest.fixture
+def cli_publisher(tmp_path, monkeypatch):
+    import os
+    import time
+    born = 'Thu Oct 08 09:00:00 2026'
+    epoch = time.mktime(time.strptime(born, '%a %b %d %H:%M:%S %Y'))
+    proc = {'pid': 101, 'born': born}
+    pane = {'window_id': '@7', 'pane_id': '%121'}
+    monkeypatch.setattr(probe, 'claude_config_dirs', lambda: [tmp_path])
+    monkeypatch.setattr(probe, 'process_marker', lambda _: ('start-ticks', 'domain'))
+    folder = tmp_path / 'sessions'
+    folder.mkdir()
+    path = folder / '101.json'
+    def publish(**changes):
+        record = dict(pid=101, kind='interactive', procStart='start-ticks', pidDomain='domain',
+                      tmux='previous-session-name:@7.%121', startedAt=(epoch + 1) * 1000,
+                      statusUpdatedAt=(epoch + 2) * 1000, status='busy')
+        record.update(changes)
+        path.write_text(json.dumps(record))
+        os.utime(path, (epoch + 3, epoch + 3))
+        return path
+    return pane, proc, publish, epoch
+
+
+def test_cli_publisher_tracks_current_identity_and_activity(cli_publisher):
+    pane, proc, publish, epoch = cli_publisher
+    publish(sessionId=OTHER)
+    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'busy', 'updated_at': epoch + 2, 'sid': OTHER}
+    publish(status='idle', sessionId=OTHER)
+    assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'idle', 'updated_at': epoch + 2, 'sid': OTHER}
+
+
+def test_metadata_preserves_verified_publisher_identity_and_time(cli_publisher, monkeypatch, tmp_path):
+    pane, proc, publish, epoch = cli_publisher
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    publish(status='idle', sessionId=OTHER)
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe, 'argv_sid', lambda _: None)
+    monkeypatch.setattr(probe, 'route_sid', lambda *_: None)
+    monkeypatch.setattr(probe, 'json_lines', lambda _: [])
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc) == {'sid': OTHER, 'cli_status': 'idle', 'cli_status_ts': epoch + 2}
+
+
+@pytest.mark.parametrize('status', ['busy', 'idle', 'waiting', 'shell'])
+def test_runtime_publisher_uuid_supersedes_launch_uuid(cli_publisher, monkeypatch, tmp_path, status):
+    pane, proc, publish, _ = cli_publisher
+    pane.update(session_name='renamed-session', window_index='0', pane_index='0')
+    proc.update(args=f'claude --session-id {SID}', nested=True)
+    publish(sessionId=OTHER, status=status)
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    folder = tmp_path / '.claude/projects/-workspace'
+    folder.mkdir(parents=True)
+    (folder / f'{SID}.jsonl').write_text(json.dumps({'type': 'last-prompt', 'sessionId': SID}))
+    (folder / f'{OTHER}.jsonl').write_text(json.dumps({
+        'type': 'assistant', 'sessionId': OTHER, 'uuid': 'reply',
+        'message': {'content': [{'type': 'text', 'text': 'Current conversation'}]},
+    }))
+    meta = probe.metadata(pane, proc)
+    assert meta['sid'] == OTHER
+    assert probe.transcript_messages(meta, '/workspace') == [
+        {'role': 'assistant', 'text': 'Current conversation', 'id': 'reply:0'},
+    ]
+
+
+def test_cli_publisher_rejects_conflicting_runtime_uuids(cli_publisher, tmp_path, monkeypatch):
+    pane, proc, publish, _ = cli_publisher
+    path = publish(sessionId=SID)
+    second = tmp_path / 'other'
+    (second / 'sessions').mkdir(parents=True)
+    (second / 'sessions/101.json').write_text(path.read_text().replace(SID, OTHER))
+    monkeypatch.setattr(probe, 'claude_config_dirs', lambda: [tmp_path, second])
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+def test_invalid_publisher_uuid_preserves_argv_identity(cli_publisher, monkeypatch, tmp_path):
+    pane, proc, publish, _ = cli_publisher
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    proc.update(args=f'claude --session-id {SID}')
+    publish(sessionId='not-a-uuid')
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc)['sid'] == SID
+
+
+@pytest.mark.parametrize('changes', [
+    {'pid': 102}, {'procStart': 'reused-pid'}, {'pidDomain': 'other-host'},
+    {'tmux': 'toy:@8.%121'}, {'tmux': 'toy:@7.%122'}, {'startedAt': 0},
+])
+def test_invalid_runtime_publisher_preserves_argv_identity(cli_publisher, monkeypatch, tmp_path, changes):
+    pane, proc, publish, _ = cli_publisher
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    proc.update(args=f'claude --session-id {SID}')
+    publish(sessionId=OTHER, **changes)
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc)['sid'] == SID
+
+
+@pytest.mark.parametrize('changes', [
+    {'pid': 102}, {'pid': '101'}, {'procStart': 'reused-pid'}, {'pidDomain': 'other-host'},
+    {'tmux': 'toy:@8.%121'}, {'tmux': 'toy:@7.%122'}, {'kind': 'sdk'},
+    {'startedAt': 0}, {'statusUpdatedAt': 0}, {'status': 'unknown'},
+])
+def test_cli_publisher_rejects_stale_or_mismatched_process(cli_publisher, changes):
+    pane, proc, publish, _ = cli_publisher
+    publish(**changes)
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+def test_cli_publisher_rejects_prior_process_file(cli_publisher):
+    import os
+    pane, proc, publish, epoch = cli_publisher
+    path = publish()
+    os.utime(path, (epoch - 1, epoch - 1))
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+def test_cli_publisher_rejects_conflicting_profiles(cli_publisher, tmp_path, monkeypatch):
+    pane, proc, publish, _ = cli_publisher
+    path = publish()
+    second = tmp_path / 'other'
+    (second / 'sessions').mkdir(parents=True)
+    (second / 'sessions/101.json').write_text(path.read_text().replace('"busy"', '"idle"'))
+    monkeypatch.setattr(probe, 'claude_config_dirs', lambda: [tmp_path, second])
+    assert REAL_CLI_ACTIVITY(pane, proc) is None
+
+
+@pytest.mark.parametrize('tail,expected', [
+    ('────────\n❯ \n────────\n', 'working'),
+    (SINGLE, 'waiting'), ('Do you want to proceed?\n', 'waiting'),
+])
+def test_cli_publisher_busy_fallback_preserves_attention(monkeypatch, tail, expected):
+    pane = {field: '' for field in probe.FIELDS}
+    pane.update(generation='server', pane_id='%121', pane_pid='100',
+                session_created='123', pane_current_path='/workspace', session_name='toy')
+    monkeypatch.setattr(probe, 'capture', lambda _: tail)
+    monkeypatch.setattr(probe, 'metadata', lambda *_: {'cli_status': 'busy'})
+    monkeypatch.setattr(probe, 'transcript_path', lambda *_: None)
+    assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
+
+
+@pytest.mark.parametrize('event', ['prompt', 'tool', 'compact'])
+@pytest.mark.parametrize('publisher_time,expected', [(41, 'working'), (42, 'working'),
+                                                    (43, 'idle'), (None, 'working')])
+def test_newer_exact_publisher_idle_supersedes_stale_work_hook(monkeypatch, event, publisher_time, expected):
+    pane = {field: '' for field in probe.FIELDS}
+    pane.update(generation='server', pane_id='%121', pane_pid='100',
+                session_created='123', pane_current_path='/workspace', session_name='toy')
+    tail = ('  104\n  ⎿ Interrupted · What should Claude do instead?\n\n'
+            '● How is Claude doing this session? (optional)\n'
+            '  1: Bad    2: Fine   3: Good   0: Dismiss\n')
+    monkeypatch.setattr(probe, 'capture', lambda _: tail)
+    monkeypatch.setattr(probe, 'metadata', lambda *_: {'event': event, 'ts': 42,
+                         'cli_status': 'idle', 'cli_status_ts': publisher_time})
+    assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
+
+
+@pytest.mark.parametrize('tail,expected', [(SINGLE, 'waiting'),
+    ('Do you want to proceed?\n', 'waiting'), ('✻ Working…\n', 'working')])
+def test_publisher_idle_never_overrides_live_work_or_attention(monkeypatch, tail, expected):
+    pane = {field: '' for field in probe.FIELDS}
+    pane.update(generation='server', pane_id='%121', pane_pid='100',
+                session_created='123', pane_current_path='/workspace', session_name='toy')
+    monkeypatch.setattr(probe, 'capture', lambda _: tail)
+    monkeypatch.setattr(probe, 'metadata', lambda *_: {'event': 'prompt', 'ts': 42,
+                         'cli_status': 'idle', 'cli_status_ts': 43})
+    assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
+
+
+def test_claude_config_dirs_preserves_watchdog_scope(tmp_path, monkeypatch):
+    from cc_tmux_api import rc_watchdog
+    monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('CC_RC_WATCHDOG_DIRS', str(tmp_path / 'routed'))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'explicit'))
+    assert rc_watchdog.config_dirs() == [tmp_path / 'routed']
+    assert probe.claude_config_dirs() == [tmp_path / 'explicit', tmp_path / '.claude', tmp_path / 'routed']
+
+
+def test_linux_process_marker_matches_cli_machine_domain(monkeypatch):
+    files = {
+        '/proc/101/stat': '101 (claude command) ' + ' '.join(['S', *['0'] * 18, 'start-ticks']),
+        '/etc/machine-id': 'machine-id\n',
+    }
+    monkeypatch.setattr(probe.sys, 'platform', 'linux')
+    monkeypatch.setattr(probe.Path, 'read_text', lambda path: files[str(path)])
+    monkeypatch.setattr(probe.os, 'readlink', lambda path: 'pid:[123]')
+    assert probe.process_marker({'pid': 101}) == ('start-ticks', 'linux:machine-id:pid:[123]')
+
+
+@pytest.mark.parametrize('utc_offset,expected_hour', [(0, '12'), (3, '09'), (-7, '19')])
+def test_darwin_process_marker_preserves_utc_and_padded_day(monkeypatch, utc_offset, expected_hour):
+    import calendar
+    monkeypatch.setattr(probe.sys, 'platform', 'darwin')
+    monkeypatch.setattr(probe.time, 'mktime', lambda parsed: calendar.timegm(parsed) - utc_offset * 3600)
+    assert probe.process_marker({'born': 'Tue Nov 3 12:34:56 2026'}) == (
+        f'Tue Nov  3 {expected_hour}:34:56 2026', 'darwin')
+
+
 def test_missing_exact_transcript_never_adopts_nested_same_cwd(tmp_path, monkeypatch):
     monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
     folder = tmp_path / '.claude/projects/-workspace'
@@ -678,6 +1000,8 @@ def test_attention_fields_survive_snapshot_without_menu(monkeypatch, tail, quest
     monkeypatch.setattr(probe, 'metadata', lambda *_: {})
     monkeypatch.setattr(probe, 'transcript_path', lambda *_: None)
     row = probe.public(probe.inspect(pane, dict(pid=101, born='birth')))
+    assert row['provider'] == 'claude'
+    assert row['transport'] == 'tmux'
     assert 'menu' not in row
     assert row['has_question'] is question
     assert row['attention_kind'] == kind
@@ -777,3 +1101,25 @@ def test_transcript_status_is_explicit_without_fabricated_messages(tmp_path, mon
     result = probe.public(data, full=True)
     assert result['transcript_status'] == expected
     assert result['messages'] == ([{'role': 'assistant', 'text': 'real answer'}] if expected == 'available' else [])
+
+
+def test_notify_library_skips_registry_paths_it_cannot_read(tmp_path, monkeypatch):
+    locked = tmp_path / 'root-only'
+    locked.mkdir()
+    registry = tmp_path / '.claude' / 'plugins' / 'installed_plugins.json'
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({'plugins': {'cc-notify@x': [{'installPath': str(locked / 'cc-notify')}]}}))
+    fallback = tmp_path / '.claude' / 'hooks' / 'cc-lib.sh'
+    fallback.parent.mkdir(parents=True)
+    fallback.write_text('')
+    monkeypatch.setattr(probe.shutil, 'which', lambda name: None)
+    monkeypatch.setattr(probe.Path, 'home', classmethod(lambda cls: tmp_path))
+    real_is_file = probe.Path.is_file
+
+    def is_file(self):
+        if str(self).startswith(str(locked)):
+            raise PermissionError(13, 'Permission denied', str(self))
+        return real_is_file(self)
+
+    monkeypatch.setattr(probe.Path, 'is_file', is_file)
+    assert REAL_NOTIFY_LIBRARY() == fallback

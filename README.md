@@ -1,6 +1,6 @@
 # cc-tmux-api
 
-HQ for native Remote Control and existing [Claude Code](https://code.claude.com) tmux sessions: discover,
+HQ for native Remote Control, loaded Codex threads and existing [Claude Code](https://code.claude.com) tmux sessions: discover,
 read conversations, answer questions, and operate unattended workers and routines.
 Run the same application on each machine. Configured HQ peers aggregate downstream
 sessions and forward reads and guarded writes through a cascade to the owning
@@ -88,6 +88,39 @@ to belong to the shared session-history store.
 
 See [protocol research, tests and deployment evidence](docs/devlog/claude_20261018-native-remote-control.md).
 
+### Existing Codex sessions
+
+HQ detects the existing local Codex app-server control socket at
+`$CODEX_HOME/app-server-control/app-server-control.sock` (default `~/.codex`).
+`CC_TMUX_CODEX_SOCKET` selects an existing socket; `CC_TMUX_CODEX=0` disables this
+source. Each existing HQ owner discovers its own currently loaded thread UUIDs
+and federates them through the same peer routes. No new Codex daemon, terminal
+scanner or history writer is started. A thread missing from discovery remains
+unreachable in the lifecycle census, not proof that its conversation ended.
+An explicit detail read can retrieve persisted history for its exact canonical
+UUID when the reachable owner confirms `notLoaded`. This archive view returns
+`read_only: true`, `lifecycle: ended`, `alive: false`, and `online: true`, with all
+controls disabled; it never resumes the thread or adds it to live discovery.
+Owner/read failures remain errors, never successful empty history.
+
+The adapter connects through the official app-server WebSocket protocol and
+rejoins an independently verified loaded UUID without changing its model,
+directory, sandbox or approval policy. Native history keeps source message IDs
+and is bounded to 400 messages / 2 MB; `history_truncated` reports the bound.
+Send, steer, interrupt and one-time command/file/permission approvals or questions
+use the existing fleet locks, revisions and receipts. Unknown dialogs remain in
+the original client, and uncertain delivery is never automatically repeated.
+Capabilities from the existing thread control the available HQ actions.
+
+Fleet is a discovery and connection layer. Session summaries and detail responses
+identify the native provider (`claude` or `codex`) separately from the transport
+(`tmux`, `native`, or `codex`). Clients must retain that distinction and use the
+owner's capabilities; transport names are not model providers.
+
+Codex sessions also flow through the same cc-proxy MCP and ACP integrations;
+they require no separate connector or T3 provider configuration. Deployment and
+compatibility evidence is recorded in `docs/devlog/claude_20261116-codex-fleet.md`.
+
 ### Mirroring native sessions to claude.ai
 
 HQ can also register each native session with Anthropic's own Remote Control,
@@ -147,6 +180,53 @@ tool results for models that support them. Actual desktop interaction still
 requires an eligible account and OS permissions; protocol/UI tests alone do not
 establish that it works on a particular machine. See
 [computer-use validation](docs/devlog/claude_20261018-native-computer-use.md).
+
+## MCP server (talk to every session from Claude)
+
+`cc-tmux-mcp` is a stdio MCP server over any HQ's HTTP API, so one Claude Code session can list, read and
+message every session that HQ federates (all VMs when pointed at the aggregator). Tools: `list_nodes`,
+`list_sessions`, `read_session`, `send_message`, `choose_option`, `respond_native_request`, `interrupt`,
+`remote_control_health`. Writes go through the HQ's normal guarded `/action` path.
+`read_session` includes the revision and native request. Pass that observed revision when selecting a
+tmux option or answering a native request; changed questions fail without retry. Action results include
+the HQ receipt: `queued` means accepted for delivery, not acknowledged by the worker. Uncertain delivery
+must never be retried. `list_nodes` exposes unreachable sources even when they have no live sessions.
+
+```bash
+claude mcp add -s user claude-sessions \
+  -e CC_TMUX_HQ_URL=http://<aggregator>:8389 -e CC_TMUX_HQ_TOKEN_FILE=~/.config/cc-tmux-api/hub-token \
+  -- uvx --from 'cc-tmux-api[mcp] @ git+https://github.com/FarisHijazi/cc-tmux-api' cc-tmux-mcp
+```
+
+`CC_TMUX_HQ_TOKEN` (or `_FILE`) is the HQ's `CC_TMUX_TOKEN`, sent as a bearer token; omit it for a local
+token-less node. The aggregator must bind an address the caller can reach (`CC_TMUX_BIND`, `CC_TMUX_ALLOWED_HOSTS`).
+
+
+**Public, for claude.ai connectors.** `cc-tmux-mcp --http --host <addr> --port 8392` serves streamable HTTP at
+`/mcp`. Every request needs a bearer token: either `CC_TMUX_MCP_TOKEN` (or `_FILE`, for Claude Code clients) or an
+OIDC JWT access token from `CC_TMUX_MCP_OIDC_ISSUER` with audience `CC_TMUX_MCP_OIDC_CLIENT_ID` **and** an email in
+`CC_TMUX_MCP_ALLOWED_EMAILS`. It refuses to start with neither. `CC_TMUX_MCP_PUBLIC_URL` sets the resource URL served in
+`/.well-known/oauth-protected-resource/mcp`. Route only the exact MCP and discovery paths through
+cc-proxy's relay; the MCP validates its bearer token instead of using browser forward-auth.
+In claude.ai, add a custom connector with the `/mcp` URL and the issuer's public client id.
+The protected-resource metadata advertises `openid email profile offline_access` for owner identity and
+refresh tokens. JWTs require expiry, subject, issuer and audience. A cc-proxy dashboard started with
+`--mcp-upstream` can publish this same adapter on its existing listener; configure
+`CC_TMUX_MCP_PUBLIC_URL` to that externally visible origin. Keep dashboard/API routes behind browser SSO;
+only the exact MCP/metadata paths use the adapter's Authentik bearer validation.
+The root `/.well-known/oauth-authorization-server` route redirects to the fixed issuer's OIDC
+metadata for clients using same-origin authorization discovery. Discovery metadata is public.
+
+## Remote Control watchdog
+
+`cc-rc-watchdog` (run it every few minutes, e.g. a systemd user timer) keeps Remote Control connected on every
+launcher-routed interactive Claude Code session in this machine's tmux. It reads `<profile>/sessions/<pid>.json`
+(tmux pane, `bridgeSessionId`) and asks the HQ (`CC_TMUX_HQ_URL`/`_TOKEN_FILE`, as for the MCP) whether each bridge is
+alive, online and mirrored. A session unhealthy on two checks 30 s apart is repaired, only when idle with an empty
+prompt: no bridge means one `/remote-control`; a stale bridge means `/remote-control` (the CLI's toggle opens a dialog
+when it thinks it is connected), **Disconnect this session**, then `/remote-control` again, which issues a new bridge
+id. Bridges straight to Anthropic (non-hex ids) are not judged. A process where a typed toggle failed is not retried
+(listed in `~/.local/state/cc-rc-watchdog/gave-up.json` until it exits). `--dry-run` reports without typing.
 
 ## Worker API
 
@@ -383,7 +463,7 @@ bodies (`{}`) for logout and test push. The contracts live in
 | `GET /api/auth` | `{required, authenticated}`; public |
 | `POST /api/auth/login` | `{token}` → `{ok}` and signed pairing cookie; public, rate limited |
 | `POST /api/auth/logout` | `{}` → `{ok}`; clears this browser's cookie |
-| `GET /api/sessions` | `{node_id, hosts, sessions, updated_at}`; hosts report `available`, lifecycle and optional `error` |
+| `GET /api/sessions` | `{node_id, hosts, sessions, updated_at}`; hosts report `available`, lifecycle and optional `error`. Optional `include_ended=false` returns only live sessions across peers; the default retains full history. |
 | `GET /api/sessions/{id}` | Session detail, including `tail`, `messages`, recognized `menu` or null, and `transcript_status` on live probe detail |
 | `POST /api/sessions/{id}/action` | `{action, revision, request_id, text?, key?, index?, response?}` → `{ok, id, request_id, revision, refresh_required?}` |
 | `GET /api/push` | `{available, public_key, reason?}` |
@@ -448,12 +528,19 @@ open. Old waiting status does not make ended or unreachable sessions actionable.
 
 ### Actions and notifications
 
-Actions are `send` (text plus Enter), `type` (text only), `key`, `select` (zero-based
-option), and `submit` (recognized review screen). Text requires a verified empty
+Actions are `send` (text plus Enter), `type` (text only), `interrupt` (canonical
+`C-c`), `key`, `select` (zero-based option), and `submit` (recognized review screen). Text requires a verified empty
 prompt, or a focused free-text option for `type`, and is limited to 16,384 UTF-8
 bytes. Keys are `Up`, `Down`, `Left`, `Right`, `Space`, `Enter`, `Escape`, `Tab`,
 `BTab`, and `C-c`. Supply the latest detail's `revision` and an 8–128 character
 `request_id`. The UI sends individual navigation keys and refreshes between steps.
+Revisions are opaque. While Claude is working, `send` and `C-c` can tolerate
+changing output only when both observations show the same canonically empty input box,
+cursor within that box, foreground process and pane identity, with no menu.
+The canonical empty-prompt check runs again before writing. All other actions
+require the exact observed screen.
+Dim input hints are decorations only when that existing prompt reader confirms
+emptiness; literal human text and slash commands remain protected.
 
 Stale identity/revision conflicts return 409; validation can return 400/422 and
 unavailable hosts return 503. Successful actions require a fresh detail read;
@@ -526,9 +613,10 @@ authentication in that mode; `/api/auth` returns
 `{required:false, authenticated:true}`. Host allowlisting, same-origin checks and
 JSON mutation requirements still apply. Public HTTPS termination is supplied by
 an external reverse proxy or tunnel; no Serve or Funnel is planned.
-The deployed homelab hostname additionally requires a shared Authentik login
-for every path; successful proxy authentication does not change `/api/auth`'s
-application-level response. Preserve the proxy gate when changing routing.
+The deployed dashboard and API require a shared Authentik login; successful proxy
+authentication does not change `/api/auth`'s application-level response. The exact
+MCP route instead requires the authenticated bearer described above, with public
+OAuth discovery metadata. Preserve both authentication gates when changing routing.
 The deployment paths and authentication owner are recorded in [AGENTS.md](AGENTS.md).
 Mobile push/PWA device delivery remains unverified; server push
 availability means configured, not delivered.

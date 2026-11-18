@@ -50,12 +50,25 @@ def native_backend():
     return get_backend()
 
 
+def codex_backend():
+    from .codex_remote import get_backend
+    return get_backend()
+
+
 NATIVE_HOST = {'id': '@native', 'label': 'Remote Control', 'native': True}
+CODEX_HOST = {'id': '@codex', 'label': 'Codex', 'native': True, 'provider': 'codex'}
 
 
 def _native_row(item):
     row = dict(item, identity={'native': item['id']})
     result = _decorate(NATIVE_HOST, row)
+    result.update(lifecycle=item['lifecycle'], alive=item['alive'])
+    return result
+
+
+def _codex_row(item):
+    row = dict(item, identity={'codex': item['id']}, transport='codex', provider='codex')
+    result = _decorate(CODEX_HOST, row)
     result.update(lifecycle=item['lifecycle'], alive=item['alive'])
     return result
 
@@ -207,6 +220,14 @@ def _resolve(identifier):
         host_id, identity = decoded
     except (ValueError, TypeError) as exc:
         raise FleetError('Invalid session ID', 400) from exc
+    if host_id == CODEX_HOST['id']:
+        if (not isinstance(identity, dict) or set(identity) != {'codex'} or
+                not isinstance(identity['codex'], str) or not re.fullmatch(
+                    r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', identity['codex'])):
+            raise FleetError('Invalid Codex session route', 400)
+        if codex_backend() is None:
+            raise FleetError('Codex app server is unavailable', 503)
+        return CODEX_HOST, identity
     if host_id == NATIVE_HOST['id']:
         if (not isinstance(identity, dict) or set(identity) != {'native'} or
                 not isinstance(identity['native'], str) or
@@ -238,7 +259,7 @@ def _decorate(host, item):
                   host_path=[host['id']], owner_node_id=node_id(), owner_session_id=identifier,
                   origin_id=node_id() + ':' + identifier, federated=False,
                   lifecycle='alive', alive=True)
-    if result.get('status') == 'unknown' and 'tail' in result:
+    if result.get('transport') != 'codex' and result.get('status') == 'unknown' and 'tail' in result:
         result['status'] = {'active': 'working', 'waiting': 'waiting', 'idle': 'idle'}.get(
             _detect_claude_status(result['tail']), 'unknown')
     result['activity'] = {'working': 'running'}.get(result.get('status'), result.get('status', 'unknown'))
@@ -303,6 +324,17 @@ def _local_snapshot(config):
             results.append((dict(NATIVE_HOST, available=True, lifecycle='alive',
                                  host_path=[NATIVE_HOST['id']], federated=False),
                             [_native_row(row) for row in native.rows()]))
+        codex = codex_backend()
+        if codex is not None:
+            status = dict(CODEX_HOST, available=False, lifecycle='unreachable',
+                          host_path=[CODEX_HOST['id']], federated=False, updated_at=time.time())
+            try:
+                sessions = [_codex_row(row) for row in codex.rows()]
+                status.update(available=True, lifecycle='alive')
+            except FleetError as exc:
+                sessions = []
+                status.update(error=str(exc), error_status=exc.status)
+            results.append((status, sessions))
         result = _observe_local(dict(hosts=[r[0] for r in results],
                                     sessions=[s for r in results for s in r[1]], updated_at=time.time()))
         with _cache_lock:
@@ -310,12 +342,13 @@ def _local_snapshot(config):
         return result
 
 
-def _peer_snapshot(host, context):
+def _peer_snapshot(host, context, include_ended=True):
     root = dict(id=host['id'], label=host['label'], host_path=[host['id']],
                 available=False, lifecycle='unreachable', updated_at=time.time(), federated=True)
-    key = (node_id(), host['id'], host['url'])
+    key = (node_id(), host['id'], host['url'], include_ended)
     try:
-        response = _peer(host, '/api/sessions', context)
+        endpoint = '/api/sessions' if include_ended else '/api/sessions?include_ended=false'
+        response = _peer(host, endpoint, context)
         if not isinstance(response.get('hosts'), list) or not isinstance(response.get('sessions'), list):
             raise FleetError('Invalid peer snapshot', 502)
         child_hosts = []
@@ -349,10 +382,10 @@ def _peer_snapshot(host, context):
         return [root, *children], old[1]
 
 
-def snapshot(path=()):
+def snapshot(path=(), *, include_ended=True):
     context = _context(path)  # Check BEFORE any cache/target lock or network IO.
     config = [] if os.environ.get('CC_TMUX_NATIVE_ONLY') == '1' else hosts()
-    cache_key = (context, json.dumps(config, sort_keys=True))
+    cache_key = (context, json.dumps(config, sort_keys=True), include_ended)
     with _cache_lock:
         entry = _cache.get('entries', {}).get(cache_key)
         if entry and time.monotonic() - entry['at'] < 3:
@@ -362,7 +395,7 @@ def snapshot(path=()):
     peers = [h for h in config if h.get('url')]
     with ThreadPoolExecutor(max_workers=min(8, len(peers) + 1)) as pool:
         local_future = pool.submit(_local_snapshot, config)
-        futures = [pool.submit(_peer_snapshot, h, context) for h in peers]
+        futures = [pool.submit(_peer_snapshot, h, context, include_ended) for h in peers]
         local = local_future.result()
         results = [f.result() for f in futures]
     sessions = local['sessions'] + [s for r in results for s in r[1]]
@@ -372,8 +405,11 @@ def snapshot(path=()):
         previous = unique.get(key)
         if previous is None or (previous.get('lifecycle') == 'unreachable' and session.get('lifecycle') != 'unreachable'):
             unique[key] = session
+    rows = list(unique.values())
+    if not include_ended:
+        rows = [s for s in rows if s.get('alive', True) is True]
     result = dict(hosts=local['hosts'] + [h for r in results for h in r[0]],
-                  sessions=list(unique.values()), updated_at=time.time(), node_id=node_id())
+                  sessions=rows, updated_at=time.time(), node_id=node_id())
     with _cache_lock:
         entries = _cache.setdefault('entries', {})
         if len(entries) >= 128:
@@ -398,6 +434,8 @@ def _ended_summary(identifier, refresh=False):
 def detail(id, path=()):
     context = _context(path)
     host, identity = _resolve(id)
+    if host['id'] == CODEX_HOST['id']:
+        return _codex_row(codex_backend().detail(identity['codex']))
     if host.get('native'):
         return _native_row(native_backend().detail(identity['native']))
     if host.get('url'):
@@ -433,7 +471,8 @@ def act(id, action, revision, request_id, text=None, key=None, index=None, path=
         request['response'] = response
     fingerprint = json.dumps(request, sort_keys=True)
     # Lock the physical target, not user-supplied ID spelling or generation.
-    target = (('@native', identity['native']) if host.get('native') else
+    target = (('@codex', identity['codex']) if host['id'] == CODEX_HOST['id'] else
+              ('@native', identity['native']) if host.get('native') else
               (host['url'], identity['peer']) if host.get('url') else
               (host.get('ssh', 'local'), identity[0], identity[1]))
     receipt_key = (host['id'], request_id)
@@ -456,7 +495,10 @@ def act(id, action, revision, request_id, text=None, key=None, index=None, path=
             receipt = {'payload': fingerprint}
             _receipts[receipt_key] = receipt
         try:
-            if host.get('native'):
+            if host['id'] == CODEX_HOST['id']:
+                result = codex_backend().act(identity['codex'], action, revision,
+                                             request_id, text=text, response=response)
+            elif host.get('native'):
                 result = native_backend().act(identity['native'], action, revision,
                                               request_id, text=text, response=response)
             elif host.get('url'):

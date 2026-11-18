@@ -173,7 +173,7 @@ def argv_sid(proc):
 
 
 FIELDS = ('session_name', 'session_created', 'pane_id', 'pane_pid', 'pane_tty',
-          'pane_current_command', 'pane_current_path', 'window_index', 'pane_index',
+          'pane_current_command', 'pane_current_path', 'window_index', 'window_id', 'pane_index',
           '@tw-src', '@hq_owner', '@hq_sid', '@hq_workdir', '@hq_title',
           'pane_dead', 'cursor_x', 'cursor_y', 'pane_in_mode', 'pane_title')
 
@@ -268,8 +268,83 @@ def route_sid(pane, proc, born, exact):
     return next(iter(candidates)) if len(candidates) == 1 else None
 
 
+def claude_config_dirs(routed_only=False):
+    override = os.environ.get('CC_RC_WATCHDOG_DIRS')
+    routed = ([Path(path).expanduser() for path in override.split(':') if path] if override else
+              sorted((Path.home() / '.local/state/claude-codex/account-router/accounts').glob('*/claude')))
+    if routed_only:
+        return routed
+    roots = [Path.home() / '.claude', *routed]
+    if os.environ.get('CLAUDE_CONFIG_DIR'):
+        roots.insert(0, Path(os.environ['CLAUDE_CONFIG_DIR']).expanduser())
+    return list(dict.fromkeys(roots))
+
+
+def process_marker(proc):
+    try:
+        if sys.platform.startswith('linux'):
+            start = Path(f"/proc/{proc['pid']}/stat").read_text().rpartition(') ')[2].split()[19]
+            machine = Path('/etc/machine-id').read_text().strip()
+            return start, f"linux:{machine}:{os.readlink('/proc/self/ns/pid')}"
+        if sys.platform == 'darwin':
+            born = time.mktime(time.strptime(proc['born'], '%a %b %d %H:%M:%S %Y'))
+            return time.strftime('%a %b %e %H:%M:%S %Y', time.gmtime(born)), 'darwin'
+    except (OSError, IndexError, ValueError):
+        pass
+    return None, None
+
+
+def cli_activity(pane, proc):
+    """Read the current UUID/activity from this exact process's existing publisher."""
+    if not pane.get('window_id'):
+        return None
+    try:
+        born = time.mktime(time.strptime(proc['born'], '%a %b %d %H:%M:%S %Y'))
+    except ValueError:
+        return None
+    marker, domain = process_marker(proc)
+    if not marker:
+        return None
+    statuses, sessions = {}, set()
+    route = f":{pane['window_id']}.{pane['pane_id']}"
+    for root in claude_config_dirs():
+        path = root / 'sessions' / f"{proc['pid']}.json"
+        try:
+            if path.stat().st_mtime < born:
+                continue
+            data = json.loads(read_tail(path, 65536))
+            if (type(data.get('pid')) is not int or data['pid'] != proc['pid'] or
+                    data.get('kind') != 'interactive' or data.get('procStart') != marker or
+                    data.get('pidDomain') != domain or not isinstance(data.get('tmux'), str) or
+                    not data['tmux'].endswith(route) or
+                    not isinstance(data.get('startedAt'), (int, float)) or data['startedAt'] / 1000 < born or
+                    not isinstance(data.get('statusUpdatedAt'), (int, float)) or data['statusUpdatedAt'] / 1000 < born):
+                continue
+            if data.get('status') in ('busy', 'idle'):
+                status = data['status']
+                statuses[status] = max(statuses.get(status, 0), data['statusUpdatedAt'] / 1000)
+            sid = uuid_value(data.get('sessionId'))
+            if sid:
+                sessions.add(sid)
+        except (OSError, ValueError, TypeError):
+            continue
+    if len(statuses) > 1 or len(sessions) > 1:
+        return None
+    result = {}
+    if len(statuses) == 1:
+        status, updated_at = next(iter(statuses.items()))
+        result.update(status=status, updated_at=updated_at)
+    if sessions:
+        result['sid'] = sessions.pop()
+    return result or None
+
+
 def metadata(pane, proc):
-    sid = argv_sid(proc)
+    activity = cli_activity(pane, proc)
+    publisher = ({'cli_status': activity['status'], 'cli_status_ts': activity['updated_at']}
+                 if activity and 'status' in activity else {})
+    # In-process resume changes the publisher UUID while argv keeps launch intent.
+    sid = (activity or {}).get('sid') or argv_sid(proc)
     exact = f"{pane['session_name']}:{pane['window_index']}.{pane['pane_index']}"
     events = []
     for name in ('cc-events.jsonl.1', 'cc-events.jsonl'):
@@ -293,10 +368,10 @@ def metadata(pane, proc):
     # @hq_sid describes launch intent, not the current runtime UUID. It must
     # never override argv/exact event evidence after resume or replacement.
     if not sid:
-        return {}
+        return publisher
     matching = [e for e in current if e['sid'] == sid]
     event = max(matching, key=lambda e: e['ts'], default={})
-    result = dict(event, sid=sid)
+    result = dict(event, sid=sid, **publisher)
     state = NOTIFY_STATE
     route = route_data(state / f'{sid}.route')
     if not route.get('remote_host') and route.get('tmux_target') in (exact, pane['pane_id']):
@@ -362,12 +437,23 @@ def transcript_messages(meta, workdir):
         message = entry.get('message') or {}
         if not isinstance(message, dict):
             continue
+        message_id = entry.get('uuid') or message.get('id')
+        message_id = message_id if isinstance(message_id, str) and message_id else None
         content = message.get('content', '')
         if isinstance(content, list):
+            if message_id:
+                for index, block in enumerate(content):
+                    if (isinstance(block, dict) and block.get('type') == 'text' and
+                            isinstance(block.get('text'), str) and block['text'].strip()):
+                        messages.append({'role': role, 'text': block['text'], 'id': f'{message_id}:{index}'})
+                continue
             content = '\n'.join(b['text'] for b in content if isinstance(b, dict)
                                 and b.get('type') == 'text' and isinstance(b.get('text'), str))
         if isinstance(content, str) and content.strip():
-            messages.append({'role': role, 'text': content})
+            record = {'role': role, 'text': content}
+            if message_id:
+                record['id'] = message_id
+            messages.append(record)
     return messages[-100:]
 
 
@@ -453,11 +539,18 @@ def parse_menu(text):
     return result
 
 
+def _readable_file(path):
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def notify_library():
     helper = shutil.which('cc-prompt-state')
     if helper:
         candidate = Path(helper).resolve().parent.parent / 'hooks' / 'cc-lib.sh'
-        if candidate.is_file():
+        if _readable_file(candidate):
             return candidate
     # Installed plugin registries are local configuration, never request input.
     registry = Path.home() / '.claude' / 'plugins' / 'installed_plugins.json'
@@ -467,12 +560,12 @@ def notify_library():
             if name.split('@')[0] == 'cc-notify':
                 for install in installs:
                     candidate = Path(install['installPath']) / 'hooks' / 'cc-lib.sh'
-                    if candidate.is_file():
+                    if _readable_file(candidate):
                         return candidate
     except (ValueError, TypeError, KeyError):
         pass
     candidate = Path.home() / '.claude' / 'hooks' / 'cc-lib.sh'
-    return candidate if candidate.is_file() else None
+    return candidate if _readable_file(candidate) else None
 
 
 def presentation(meta, menu, token=None, status='unknown', attention_kind=None):
@@ -533,13 +626,51 @@ def capture(pane):
     return tmux('capture-pane', '-p', '-t', pane).stdout[-LIMIT:]
 
 
+def working_input(pane, tail, menu, status):
+    """A canonical empty input box under a working Claude, independent of decoration."""
+    if status != 'working' or menu or pane['pane_in_mode'] != '0' or pane['cursor_x'] != '2':
+        return None
+    lines = tail.splitlines(keepends=True)
+    borders = [i for i, line in enumerate(lines) if line.startswith('───')]
+    if len(borders) < 2:
+        return None
+    top, bottom = borders[-2:]
+    prompt = lines[top + 1:bottom]
+    if not prompt or not prompt[0].startswith('❯'):
+        return None
+    if pane['cursor_y'] != str(top + 1):
+        return None
+    if not empty_prompt({'menu': menu, '_pane': pane, 'pane': pane['pane_id'], 'tail': tail}):
+        return None
+    return lines[top] + lines[bottom]
+
+
+def screen_revision(identity, pane, tail, menu, status):
+    state = [identity, pane['pane_current_command'], pane['cursor_x'],
+             pane['cursor_y'], pane['pane_in_mode']]
+    exact = digest([*state, tail])
+    prompt = working_input(pane, tail, menu, status)
+    if prompt is None:
+        return exact
+    # Output scrolls and status bars tick while the same input box remains ready.
+    control = [identity, pane['pane_current_command'], pane['pane_in_mode'], prompt]
+    return exact + ':w:' + digest(control)
+
+
+def same_revision(current, expected, action, key=None):
+    if current == expected:
+        return True
+    pattern = r'[0-9a-f]{64}:w:[0-9a-f]{64}'
+    return ((action in ('send', 'interrupt') or action == 'key' and key == 'C-c') and isinstance(expected, str) and
+            bool(re.fullmatch(pattern, current)) and bool(re.fullmatch(pattern, expected)) and
+            current.split(':')[2] == expected.split(':')[2])
+
+
 def inspect(pane, proc):
     tail = capture(pane['pane_id'])
     meta = metadata(pane, proc)
     identity = [pane['generation'], pane['pane_id'], pane['pane_pid'],
                 pane['session_created'], proc['pid'], proc['born']]
-    revision = digest([identity, pane['pane_current_command'], pane['cursor_x'],
-                       pane['cursor_y'], pane['pane_in_mode'], tail])
     managed = bool(pane['@hq_owner'] and pane['session_name'].startswith(pane['@hq_owner']))
     workdir = (pane['@hq_workdir'] if managed else '') or pane['pane_current_path']
     menu = parse_menu(tail)
@@ -549,11 +680,18 @@ def inspect(pane, proc):
     # or unknown terminal output can still use the last lifecycle event.
     if status not in ('working', 'waiting'):
         if meta.get('event') in ('prompt', 'tool', 'compact'):
-            status = 'working'
+            newer_idle = (meta.get('cli_status') == 'idle' and
+                          isinstance(meta.get('cli_status_ts'), (int, float)) and
+                          isinstance(meta.get('ts'), (int, float)) and
+                          meta['cli_status_ts'] > meta['ts'])
+            status = 'idle' if newer_idle else 'working'
         elif meta.get('event') == 'menu':
             status = 'waiting'
         elif meta.get('event') == 'stop':
             status = 'idle'
+    if status in ('idle', 'unknown') and meta.get('cli_status') == 'busy':
+        status = 'working'
+    revision = screen_revision(identity, pane, tail, menu, status)
     # Keep producer tokens opaque. A new prompt suppresses the preceding
     # outcome; never reimplement cc_present's token semantics here.
     token = meta.get('token', '')
@@ -573,6 +711,7 @@ def inspect(pane, proc):
     attention_kind = 'question' if has_question else 'permission' if permission else None
     display = presentation(meta, menu, token=token, status=status, attention_kind=attention_kind)
     return dict(identity=identity, session=pane['session_name'], pane=pane['pane_id'],
+                provider='claude', transport='tmux',
                 title=meta.get('title') or (pane['@hq_title'] if managed else '') or tab_name or pane['pane_title'] or pane['session_name'],
                 workdir=workdir, status=status, status_emoji=display['status_emoji'],
                 status_label=display['status_label'],
@@ -665,6 +804,8 @@ def validate_text(text):
 
 def action_keys(item, request):
     action, menu = request.get('action'), item['menu']
+    if action == 'interrupt':
+        return ['C-c']
     if action in ('send', 'type'):
         validate_text(request.get('text'))
         free = bool(menu and menu['options'][menu['focused_index']].get('kind') == 'free_text')
@@ -702,15 +843,24 @@ def action_keys(item, request):
 
 def perform(request):
     item = discover(request['identity'])[0]
-    if item['revision'] != request.get('revision'):
+    if not same_revision(item['revision'], request.get('revision'), request['action'], request.get('key')):
         raise ProbeError('Screen changed; refresh before acting')
     if item['_pane']['pane_in_mode'] != '0' or '+' not in item['_proc']['state']:
         raise ProbeError('Claude is not the verified foreground target')
     keys = action_keys(item, request)
+    working_interrupt = (request['action'] == 'interrupt' or
+                         request['action'] == 'key' and request.get('key') == 'C-c') and ':w:' in item['revision']
+    if working_interrupt and not empty_prompt(item):
+        raise ProbeError('Input changed; refresh before acting')
     # Re-observe after prompt helper/validation; refuse changes before writing.
     latest = discover(request['identity'])[0]
-    if latest['revision'] != item['revision']:
-        raise ProbeError('Screen changed during validation')
+    if not same_revision(latest['revision'], item['revision'], request['action'], request.get('key')):
+        raise ProbeError('Screen changed during validation; refresh before acting')
+    if latest['_pane']['pane_in_mode'] != '0' or '+' not in latest['_proc']['state']:
+        raise ProbeError('Claude is not the verified foreground target')
+    if request['action'] == 'send' or working_interrupt:
+        if not empty_prompt(latest):
+            raise ProbeError('Input changed during validation; refresh before acting')
     pane = item['pane']
     if request['action'] in ('send', 'type'):
         text = request['text']
