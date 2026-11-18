@@ -41,6 +41,8 @@ import secrets
 import socket
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
@@ -57,6 +59,32 @@ from .security import COOKIE, MAX_AGE, Security
 
 STATIC = Path(__file__).resolve().parent / "static"
 ROUTINE_REAP_HOURS = float(os.environ.get("CC_TMUX_ROUTINE_REAP_HOURS", "12"))
+OBSERVER_CAPACITY = 32
+
+
+class ObserverRequests:
+    """Bound passive waits separately from the native ingest/control executor."""
+
+    def __init__(self):
+        self._slots = threading.BoundedSemaphore(OBSERVER_CAPACITY)
+        self._executor = ThreadPoolExecutor(max_workers=OBSERVER_CAPACITY,
+                                            thread_name_prefix="hq-observer")
+
+    async def run(self, function, *args, **kwargs):
+        if not self._slots.acquire(blocking=False):
+            raise HTTPException(503, "Observer capacity reached; retry this read later")
+        try:
+            future = self._executor.submit(function, *args, **kwargs)
+        except RuntimeError as exc:
+            self._slots.release()
+            raise HTTPException(503, "Observer requests are shutting down") from exc
+        # Cancellation can stop an unstarted future, but an executing long poll
+        # owns its slot until the actual thread completes, even after disconnect.
+        future.add_done_callback(lambda _: self._slots.release())
+        return await asyncio.wrap_future(future)
+
+    def close(self):
+        self._executor.shutdown(wait=False, cancel_futures=True)
 
 
 def cascade_path(request: Request) -> tuple[str, ...]:
@@ -123,10 +151,13 @@ async def _lifespan(app: FastAPI):
     tasks.append(asyncio.create_task(monitor()))
     if app.state.push.config()["available"]:
         tasks.append(asyncio.create_task(deliver_push()))
-    yield
-    for t in tasks:
-        t.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        yield
+    finally:
+        app.state.observers.close()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class WorkerAction(BaseModel):
@@ -181,6 +212,7 @@ class PushPreference(BaseModel):
 
 def create_app() -> FastAPI:
     app = FastAPI(title="cc-tmux-api", lifespan=_lifespan)
+    app.state.observers = ObserverRequests()
     security = Security(
         os.environ.get("CC_TMUX_TOKEN", ""), os.environ.get("CC_TMUX_PUBLIC_URL", "")
     )
@@ -235,6 +267,12 @@ def create_app() -> FastAPI:
     @app.get("/api/sessions/{session_id}")
     def session_detail(session_id: str, request: Request):
         return fleet.detail(session_id, path=cascade_path(request))
+
+    @app.get("/api/sessions/{session_id}/events")
+    async def session_events(session_id: str, request: Request,
+                             after: str | None = None, wait: float = 0):
+        return await app.state.observers.run(fleet.observe, session_id, after, wait,
+                                             path=cascade_path(request))
 
     @app.post("/api/sessions/{session_id}/action")
     def session_action(session_id: str, req: SessionAction, request: Request):

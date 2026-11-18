@@ -71,3 +71,24 @@ process inventory; keep that canonical conversion when comparing markers.
 Profile discovery is shared with `rc_watchdog`; no additional poller owns status.
 A verified publisher idle timestamp may supersede a strictly older work hook;
 current spinner/menu detection and exact process/pane checks always retain priority.
+The same NativeRemote owner now stores a bounded passive observer tail and Mod
+acceptance receipts in its registry. `/api/sessions/{id}/events` uses exact fleet
+routing and existing API security; `/v1/code/sessions/mod-events` uses launch auth
+and must resolve exactly one explicit current Claude UUID, never infer or create
+a session. The optional explicit native bridge ID binds that exact existing owner;
+conversation rotation requires previous-UUID CAS and a fresh producer. Preserve
+that binding across native init's cse placeholder, reject stale producer rebinding,
+and save the identity atomically with its event batch. Mod events cannot enter
+`_ingest`, `_queue`, transcript storage or liveness updates. Ordinary observations
+and initial bridge-to-UUID binding do not change revisions. Canonical UUID rotation
+must atomically advance revision/input_revision to reject actions inspected under
+the old conversation, including rotations reported by native init itself.
+Native and Mod acceptance wake readers only after a
+durable save; preserve the session object's identity when rolling back a failure.
+Producer UUID/sequence high-watermarks prevent an evicted receipt from becoming a
+second observation. Cursor expiry/reset and oversized native events report gaps.
+Long-poll requests use the server's bounded observer executor, separate from
+native ingest/control offloads. Capacity is 32 with explicit 503 admission;
+cancelled requests retain their slot until the underlying wait actually finishes.
+README's observation contract owns the bounds and wire schema. This source
+feature does not establish deployment or live interactive acceptance.

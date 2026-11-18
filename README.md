@@ -88,6 +88,81 @@ to belong to the shared session-history store.
 
 See [protocol research, tests and deployment evidence](docs/devlog/claude_20261018-native-remote-control.md).
 
+### Observing interactive native sessions
+
+`GET /api/sessions/{opaque-fleet-id}/events?after={cursor}&wait=20` reads the
+existing native owner's observation stream through the same browser authentication,
+exact fleet identity, peer routing and cascade checks as session detail. It returns
+`{session_id, events, cursor, reset}`. Each event has `{cursor, source, kind, data}`
+and may have `id`; `source` is `native` or `mod`. Native events are the original
+validated worker payloads. Mod events are passive observations, never native input.
+Other transports reject observation rather than starting or resuming a session.
+
+Without `after`, the response is the retained tail, **not complete history**.
+Use session detail for the conversation. Supply the returned opaque cursor to
+read only later events; `wait` accepts zero through 20 seconds and waits only
+when that cursor is current. An expired cursor returns HTTP 200 with no events,
+`reset: true`, `gap: {reason: "expired"}` and the current cursor. A cursor from
+another stream or ahead of this one instead reports `reason: "reset"`. Clients
+must surface that gap and deliberately choose where to continue. Malformed cursors
+return 400; unsupported transports return 409. Reads never touch liveness,
+revisions, commands, permissions or transcripts.
+Each HQ admits at most 32 concurrent observation requests on a dedicated executor;
+excess reads receive 503. Waiting observers cannot consume native ingestion or
+control executor slots. Cancelling a request leaves its slot reserved until the
+underlying bounded wait finishes, including a forwarded peer read.
+
+The observation tail and Mod receipts persist in the existing native registry.
+Each session retains at most 1,024 observations and 1 MiB of event data. An
+individual native event over 64 KiB becomes a `gap` event with
+`data: {reason: "event_too_large", kind: ...}`; unrepresentable JSON instead reports
+`reason: "invalid_json"`, and an empty native kind reports `reason: "invalid_kind"`.
+The native transcript owner still processes the original
+event normally. Polling readers wake only after the
+registry's atomic save completes. A failed native event save restores the prior
+state so retrying cannot lose an event behind an uncommitted duplicate receipt.
+
+The optional plugin publisher sends `POST /v1/code/sessions/mod-events` with the
+existing `x-hq-native-key` launch credential and
+`{version: 1, claude_session_id, events: [{id, kind, data}]}`. The exact canonical
+Claude UUID must match one existing unarchived native session: absent is 404,
+ambiguous is 409. This endpoint cannot register a session, mark it alive, insert
+messages or queue controls. Ordinary observations do not change native revisions.
+Accepted kinds are
+`prompt.submit`, `turn.start`, `turn.step`, `turn.complete`, `tool.call`,
+`tool.result`, `session.append`, `session.end` and `gap`.
+
+Current Claude Remote Control replaces its local conversation UUID with the
+`cse_` bridge ID on native events. An authenticated publisher may include
+`native_session_id` with its exact existing bridge ID to bind that session to
+`claude_session_id`. The publisher must obtain both from its own CLI identity
+record, never infer them from a title, directory or other session. Initial binding
+accepts only an unset identity or that session's bridge placeholder. Changing an
+existing UUID also requires `previous_claude_session_id` to equal the current UUID
+and a fresh producer. A previously accepted producer cannot rebind an owner or be
+reused for a different conversation. Duplicate current owners, stale bindings and
+conflicting UUIDs return 409. Unknown or archived explicit owners return 404.
+Binding and event acceptance share one atomic save; a failed batch changes neither.
+Rotating an existing canonical UUID also advances the native revision and action
+floor atomically, so commands inspected under the previous conversation fail.
+Initial bridge-to-UUID binding, repeated bindings and later observations leave
+that floor unchanged. Native init carrying an actual changed UUID uses the same
+fence; its ordinary bridge placeholder never changes identity.
+Repeated native init events carrying the bridge placeholder cannot erase the UUID.
+Without these optional fields, existing unique-UUID resolution remains supported.
+
+An event ID is a fresh producer UUID, a colon and a consecutive positive sequence
+starting at one. Retry an uncertain HTTP acknowledgment with the identical batch.
+The receipt includes the matched `claude_session_id`, native `session_id`, current
+cursor and per-event `{id, duplicate, cursor}` results. Conflicting IDs or skipped
+sequences return 409 without partially accepting a batch. The owner remembers
+each producer's sequence and its latest 128 payload receipts; an older retry
+returns 409 instead of being appended again. There are at most 32 producers per
+native session; reaching that bound is an explicit conflict, not silent eviction.
+Batches allow 128 events and 256 KiB; individual Mod events must fit below 64 KiB
+including observer framing. JSON nesting is limited to 32 levels, with finite
+JSON values only. The credential and payloads belong in private runtime storage.
+
 ### Existing Codex sessions
 
 HQ detects the existing local Codex app-server control socket at
