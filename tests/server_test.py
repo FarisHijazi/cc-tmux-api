@@ -108,7 +108,7 @@ def test_observer_capacity_never_starves_native_mod_ingestion(monkeypatch, tmp_p
     sid = client.post('/v1/code/sessions', headers=launch, json={}).json()['session']['id']
     conversation = str(uuid4())
     backend._sessions[sid]['claude_session_id'] = conversation
-    backend._save()
+    backend._save(*backend._sessions.values())
     cursor = backend.observe(sid)['cursor']
     entered = []
     guard = threading.Lock()

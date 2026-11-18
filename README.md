@@ -112,14 +112,29 @@ excess reads receive 503. Waiting observers cannot consume native ingestion or
 control executor slots. Cancelling a request leaves its slot reserved until the
 underlying bounded wait finishes, including a forwarded peer read.
 
-The observation tail and Mod receipts persist in the existing native registry.
+The observation tail and Mod receipts persist in the existing native owner.
+Its `native/native-remote.sqlite3` database stores native session payloads and their
+observation/receipt payloads in two tables within one transaction owner. Each mutation
+commits only the changed session with SQLite `synchronous=FULL`; passive Mod batches
+write only observation/receipt data. Binding or rotating the conversation commits both
+tables atomically. This avoids rewriting retained history for each observation. The database
+and transaction journal are private (0600). On first startup, HQ imports the old
+`native-remote.json` into a temporary database and atomically publishes the complete
+database. Every record, credential hash, epoch, command, cursor and receipt is retained.
+Later startups use only SQLite; an invalid database or unknown schema refuses startup
+instead of loading stale JSON. The legacy file remains an unchanged migration snapshot.
+Back up the current database with SQLite's backup API. Before downgrading to a JSON-only
+release, stop this HQ owner and export **current** SQLite records into the version-1
+JSON envelope, merging each session with its matching observation/receipt row;
+never point the old release at the obsolete migration snapshot.
+Keep the exported JSON private and preserve the original snapshot separately.
 Each session retains at most 1,024 observations and 1 MiB of event data. An
 individual native event over 64 KiB becomes a `gap` event with
 `data: {reason: "event_too_large", kind: ...}`; unrepresentable JSON instead reports
 `reason: "invalid_json"`, and an empty native kind reports `reason: "invalid_kind"`.
 The native transcript owner still processes the original
 event normally. Polling readers wake only after the
-registry's atomic save completes. A failed native event save restores the prior
+database transaction commits. A failed native event save restores the prior
 state so retrying cannot lose an event behind an uncommitted duplicate receipt.
 
 The optional plugin publisher sends `POST /v1/code/sessions/mod-events` with the

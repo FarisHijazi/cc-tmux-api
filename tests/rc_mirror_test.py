@@ -161,7 +161,7 @@ def test_registers_with_placeholder_owner_and_reports_upstream_link(hub):
     assert row["upstream"] == {"session_url": "https://claude.ai/code/session_upstream1",
                                "status": "connected"}
     assert row["private"] is False
-    assert "upstream-jwt" not in backend._path.read_text()
+    assert b"upstream-jwt" not in backend._path.read_bytes()
 
 
 def test_forwards_cli_events_state_and_hq_typed_messages(hub):

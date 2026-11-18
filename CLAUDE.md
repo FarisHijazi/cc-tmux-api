@@ -34,7 +34,16 @@ Dev now uses the same Python owner after explicit Rust API/state parity.
 Native launch keys are private runtime files; never place their values in docs.
 Native registry routes and SSE lock access run off the HTTP event loop and outside
 FastAPI's shared request pool. Keep each mutation, lock and durable save together;
-never acknowledge a worker event before its atomic registry replacement finishes.
+never acknowledge a worker event before its database transaction commits.
+`NativeRemote` is the sole native persistence owner: `native-remote.sqlite3` stores
+native payloads and per-session observations/receipts in the same transaction.
+Ordinary Mod batches update only observations; UUID binding/rotation updates both
+atomically. Use explicit changed-record/deletion commits and preserve FK ownership.
+The first startup atomically imports legacy JSON; subsequent startups never fall
+back to it. Preserve private database/journal permissions, FULL synchronous commits,
+live session object identities and failure rollback. The old JSON is an immutable
+migration snapshot, not a second writer or a safe current-state rollback source.
+README owns migration, backup and downgrade requirements.
 Computer-use protocol support, deployed consent tests and account/OS limits are recorded
 in [the computer-use devlog](docs/devlog/claude_20261018-native-computer-use.md).
 The native-first UI and the Remote Control protocol as claude.ai uses it (captured
