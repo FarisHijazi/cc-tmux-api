@@ -12,6 +12,7 @@ asking Claude to show that menu again.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import logging
 import os
@@ -450,6 +451,9 @@ def main():
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
+    GAVE_UP.parent.mkdir(parents=True, exist_ok=True)
+    lock = open(GAVE_UP.parent / "lock", "w")
+    fcntl.flock(lock, fcntl.LOCK_EX)  # the timer and a manual --now must never type into the same pane at once
     active = 0 if args.force else args.active_seconds
     rows = run_once(confirm_after=0 if args.now else args.confirm_after, dry_run=args.dry_run,
                     report_all=args.now, renew=args.renew_names,
