@@ -943,7 +943,7 @@ def test_publisher_idle_never_overrides_live_work_or_attention(monkeypatch, tail
     assert probe.inspect(pane, dict(pid=101, born='birth'))['status'] == expected
 
 
-def test_claude_config_dirs_preserves_watchdog_scope(tmp_path, monkeypatch):
+def test_watchdog_override_replaces_every_profile(tmp_path, monkeypatch):
     from cc_tmux_api import rc_watchdog
     monkeypatch.setattr(probe.Path, 'home', lambda: tmp_path)
     monkeypatch.setenv('CC_RC_WATCHDOG_DIRS', str(tmp_path / 'routed'))

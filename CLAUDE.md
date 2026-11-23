@@ -53,8 +53,10 @@ verified live) is in `docs/devlog/claude_20261023-upstream-mirror.md`.
 The `cc-tmux-mcp` MCP server (`src/cc_tmux_api/mcp_server.py`, `[mcp]` extra, mcp SDK 2.x `MCPServer`) is a thin
 HTTP client of an HQ; keep fleet logic in the HQ, never in the MCP. Deployment: `docs/devlog/claude_20261111-mcp-and-hub-fix.md`.
 `cc-rc-watchdog` (`src/cc_tmux_api/rc_watchdog.py`) detects from session files + HQ health, never from screen text;
-it types only into idle sessions with an empty prompt, and never twice into a process whose toggle failed
-(`~/.local/state/cc-rc-watchdog/gave-up.json`): retrying flooded a live conversation with 150 `/remote-control`s. Same devlog.
+the screen only gates typing: idle, empty prompt, no menu, no recent client input. It never types twice into a process
+whose repair failed (`~/.local/state/cc-rc-watchdog/gave-up.json`): retrying flooded a live conversation with 150
+`/remote-control`s. Same devlog; double `/rc`, `--now`/`--close-menus`/`--renew-names` and naming evidence:
+`docs/devlog/claude_20261123-rc-force.md`.
 Public `/mcp` on cc-proxy.fhijazi.com (and legacy cchq.fhijazi.com): OIDC JWT + email allowlist,
 or static token; never route `/api` around SSO. Root authorization-server discovery redirects to the
 fixed Authentik issuer's OIDC metadata for Claude.ai compatibility.
