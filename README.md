@@ -315,14 +315,40 @@ metadata for clients using same-origin authorization discovery. Discovery metada
 
 ## Remote Control watchdog
 
-`cc-rc-watchdog` (run it every few minutes, e.g. a systemd user timer) keeps Remote Control connected on every
-launcher-routed interactive Claude Code session in this machine's tmux. It reads `<profile>/sessions/<pid>.json`
-(tmux pane, `bridgeSessionId`) and asks the HQ (`CC_TMUX_HQ_URL`/`_TOKEN_FILE`, as for the MCP) whether each bridge is
-alive, online and mirrored. A session unhealthy on two checks 30 s apart is repaired, only when idle with an empty
-prompt: no bridge means one `/remote-control`; a stale bridge means `/remote-control` (the CLI's toggle opens a dialog
-when it thinks it is connected), **Disconnect this session**, then `/remote-control` again, which issues a new bridge
-id. Bridges straight to Anthropic (non-hex ids) are not judged. A process where a typed toggle failed is not retried
-(listed in `~/.local/state/cc-rc-watchdog/gave-up.json` until it exits). `--dry-run` reports without typing.
+`cc-rc-watchdog` (a systemd user timer every 5 min) keeps Remote Control connected on every interactive Claude Code
+session in this machine's tmux, in every profile (`~/.claude`, `$CLAUDE_CONFIG_DIR`, launcher-routed accounts). It reads
+`<profile>/sessions/<pid>.json` (tmux pane, `status`, `bridgeSessionId`) and asks the HQ (`CC_TMUX_HQ_URL`/`_TOKEN_FILE`,
+as for the MCP) whether each bridge is alive, online and mirrored; with the HQ unreachable it only connects sessions
+that have no bridge. A session unhealthy on two checks 30 s apart is repaired:
+
+- no bridge: `/rc` twice. The first connects; the second opens the CLI's Remote Control dialog, answered with
+  **Continue**, which leaves a connected bridge untouched (measured on 2.1.329).
+- stale bridge: `/rc`, **Disconnect this session**, then the same double `/rc`, which registers a new bridge id.
+
+It types only into an idle session whose prompt is empty (a dim placeholder counts as empty): a draft, an open menu
+(AskUserQuestion, permission prompt, any `Enter to select`/`Esc to cancel` footer) or a busy turn is skipped and retried
+next run. A pane whose window got client input in the last 120 s (`#{client_activity}`) is skipped as in use. Bridges
+straight to Anthropic (non-hex ids) are not judged. A process where a typed repair failed is not retried (listed in
+`~/.local/state/cc-rc-watchdog/gave-up.json` until it exits).
+
+```text
+cc-rc-watchdog --now --dry-run      every session, what it would do and why it would skip
+cc-rc-watchdog --now                repair now on this host and every $CC_RC_WATCHDOG_PEERS ssh alias
+  --close-menus                     Escape an open menu in a waiting (never busy) session, repair, then type
+                                    "sorry i skipped the menu by accident, could you show me the menu options again"
+  --renew-names                     also reconnect healthy sessions, so the app shows each one's current title
+  --active-seconds N | --force      in-use window (0 disables) | type into in-use panes too
+```
+
+Deployment reads one env file, `~/.config/cc-rc-watchdog/env`, shared by the timer and peer runs
+(`set -a; . ~/.config/cc-rc-watchdog/env` over ssh): `CC_RC_WATCHDOG_FROM` (the uvx `--from` spec pinning the
+release), the HQ or MCP variables above, `TMUX_TMPDIR`, and optionally `CC_RC_WATCHDOG_PEERS`. The unit is
+`EnvironmentFile=%h/.config/cc-rc-watchdog/env` with
+`ExecStart=%h/.local/bin/uvx --from ${CC_RC_WATCHDOG_FROM} cc-rc-watchdog`.
+
+Remote Control names a session only when its bridge registers: the conversation title if there is one, else
+`<prefix>-<two words>` (`--remote-control-session-name-prefix`, default the hostname). Neither `/rename` nor a later
+auto title changes a live bridge's name, so `--renew-names` (a reconnect) is how a new name reaches the app.
 
 ## Worker API
 

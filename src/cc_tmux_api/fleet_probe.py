@@ -268,12 +268,10 @@ def route_sid(pane, proc, born, exact):
     return next(iter(candidates)) if len(candidates) == 1 else None
 
 
-def claude_config_dirs(routed_only=False):
+def claude_config_dirs():
     override = os.environ.get('CC_RC_WATCHDOG_DIRS')
     routed = ([Path(path).expanduser() for path in override.split(':') if path] if override else
               sorted((Path.home() / '.local/state/claude-codex/account-router/accounts').glob('*/claude')))
-    if routed_only:
-        return routed
     roots = [Path.home() / '.claude', *routed]
     if os.environ.get('CLAUDE_CONFIG_DIR'):
         roots.insert(0, Path(os.environ['CLAUDE_CONFIG_DIR']).expanduser())

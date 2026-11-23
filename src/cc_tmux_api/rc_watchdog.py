@@ -2,9 +2,11 @@
 
 Detection reads files, not the screen: Claude Code writes `<config>/sessions/<pid>.json` with the tmux
 pane and `bridgeSessionId` (cleared on disconnect), and the HQ reports whether that bridge is online.
-Repair drives the CLI's own `/remote-control` toggle, only when the session is idle with an empty prompt:
-  disconnected -> /remote-control
-  stale        -> /remote-control, pick "Disconnect this session", /remote-control
+Repair drives the CLI's own `/rc` toggle, only when the session is idle with an empty prompt and no menu:
+  disconnected -> /rc twice; a "Remote Control" dialog (already connected) is answered with Continue
+  stale        -> /rc, pick "Disconnect this session", then the disconnected repair
+With --close-menus a session waiting on a menu (never a busy one) gets Escape first and, once repaired, a message
+asking Claude to show that menu again.
 """
 
 from __future__ import annotations
@@ -26,7 +28,12 @@ from .fleet_probe import claude_config_dirs
 log = logging.getLogger("rc-watchdog")
 RULE = "────"
 HUB_ID = re.compile(r"[0-9a-f]{32}")
-COMPLETION = re.compile(r"❯ /remote-control {2,}\S")
+COMPLETION = re.compile(r"❯\s+(/remote-control|…\S*) \(rc\)")
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[0m|\x1b\[22m|$)")
+MENU_FOOTER = re.compile(r"Enter to (select|confirm|submit)|Esc to (cancel|close|continue|go back)|↑/↓ to navigate")
+ENV_FILE = "~/.config/cc-rc-watchdog/env"
+REASK = "sorry i skipped the menu by accident, could you show me the menu options again"
 
 
 @dataclass(frozen=True)
@@ -40,8 +47,8 @@ class Session:
 
 
 def config_dirs() -> list[Path]:
-    # Only launcher-routed profiles: their bridges go through the HQ, so the HQ's view is authoritative.
-    return claude_config_dirs(routed_only=True)
+    override = os.environ.get("CC_RC_WATCHDOG_DIRS")
+    return [Path(p).expanduser() for p in override.split(":") if p] if override else claude_config_dirs()
 
 
 def _alive(pid: int) -> bool:
@@ -100,43 +107,91 @@ def diagnose(session: Session, health: dict[str, bool]) -> str | None:
     return None if health.get("cse_" + hub_id) else "reconnect"
 
 
+def plain(line: str) -> str:
+    return ANSI.sub("", line).rstrip()
+
+
 class Tmux:
     def capture(self, pane: str) -> list[str]:
-        out = subprocess.run(["tmux", "capture-pane", "-p", "-t", pane], capture_output=True, text=True, check=True)
-        return [line.rstrip() for line in out.stdout.splitlines() if line.strip()]
+        """Screen lines with styling kept, so a dim placeholder can be told from typed text."""
+        out = subprocess.run(["tmux", "capture-pane", "-e", "-p", "-t", pane], capture_output=True, text=True,
+                             check=True)
+        return [line.rstrip() for line in out.stdout.splitlines() if plain(line).strip()]
+
+    def idle_for(self, pane: str) -> float:
+        """Seconds since a client showing this pane's window last sent input (inf when nobody is looking)."""
+        where = subprocess.run(["tmux", "display", "-p", "-t", pane, "#{window_id}"], capture_output=True, text=True,
+                               check=True).stdout.strip()
+        out = subprocess.run(["tmux", "list-clients", "-F", "#{client_activity} #{window_id}"], capture_output=True,
+                             text=True, check=True).stdout
+        seen = [int(a) for a, w in (line.split() for line in out.splitlines() if line.strip()) if w == where]
+        return time.time() - max(seen) if seen else float("inf")
 
     def keys(self, pane: str, *keys: str, literal: bool = False):
         cmd = ["tmux", "send-keys", "-t", pane] + (["-l", "--"] if literal else []) + list(keys)
         subprocess.run(cmd, check=True)
 
 
-def prompt_is_empty(lines: list[str]) -> bool:
-    for i in range(len(lines) - 2, 0, -1):
-        if lines[i].startswith("❯") and lines[i - 1].startswith(RULE) and lines[i + 1].startswith(RULE):
-            return lines[i].strip() == "❯"
-    return False
+def prompt_state(lines: list[str]) -> str:
+    """`empty`, `draft` (typed text, never clobbered) or `menu` (no prompt box, or a menu under it)."""
+    text = [plain(line) for line in lines]
+    for i in range(len(text) - 2, 0, -1):
+        if text[i].startswith("❯") and text[i - 1].startswith(RULE) and text[i + 1].startswith(RULE):
+            if any(MENU_FOOTER.search(line) for line in text[i + 1:]):
+                return "menu"
+            return "empty" if plain(DIM.sub("", lines[i])).strip() == "❯" else "draft"
+    return "menu"
 
 
 def highlighted(lines: list[str]) -> str:
-    return next((line.strip() for line in reversed(lines) if line.strip().startswith("❯")), "")
+    return next((s for s in (plain(line).strip() for line in reversed(lines)) if s.startswith("❯")), "")
+
+
+def rc_dialog(lines: list[str]) -> bool:
+    text = [plain(line) for line in lines]
+    return any(line.strip() == "Remote Control" for line in text) and any("Continue" in line for line in text)
 
 
 class Repairer:
-    def __init__(self, tmux=None, sleep=time.sleep, reread=read_session, settle=1.0, wait=25.0):
+    def __init__(self, tmux=None, sleep=time.sleep, reread=read_session, settle=1.0, wait=25.0, close_menus=False,
+                 active_window=120.0):
         self.tmux, self.sleep, self.reread, self.settle, self.wait = tmux or Tmux(), sleep, reread, settle, wait
+        self.close_menus, self.active_window = close_menus, active_window
         self.typed = False
 
     def _toggle(self, pane: str) -> list[str]:
-        self.tmux.keys(pane, "/remote-control", literal=True)
+        self.tmux.keys(pane, "/rc", literal=True)
         self.sleep(self.settle)
-        if not any(COMPLETION.search(line) for line in self.tmux.capture(pane)):
+        if not any(COMPLETION.search(plain(line)) for line in self.tmux.capture(pane)):
             self.tmux.keys(pane, "Escape")
             self.tmux.keys(pane, "C-u")
+            self.sleep(self.settle)
             raise RuntimeError("autocomplete did not offer /remote-control")
         self.tmux.keys(pane, "Enter")
         self.typed = True
         self.sleep(self.settle * 2)
         return self.tmux.capture(pane)
+
+    def _continue_dialog(self, pane: str, lines: list[str]):
+        for _ in range(4):
+            if highlighted(lines) == "❯ Continue":
+                self.tmux.keys(pane, "Enter")
+                self.sleep(self.settle * 2)
+                return
+            self.tmux.keys(pane, "Down")
+            self.sleep(self.settle / 2)
+            lines = self.tmux.capture(pane)
+        self.tmux.keys(pane, "Escape")
+        raise RuntimeError("could not select Continue in the Remote Control dialog")
+
+    def _send_rc(self, pane: str):
+        """One `/rc`. It connects a disconnected CLI; a connected one opens the dialog, answered with Continue."""
+        state = prompt_state(self.tmux.capture(pane))
+        if state != "empty":
+            raise RuntimeError("a menu or dialog is open" if state == "menu" else "prompt has a draft")
+        lines = self._toggle(pane)
+        if rc_dialog(lines):
+            self._continue_dialog(pane, lines)
 
     def _disconnect_from_dialog(self, pane: str, lines: list[str]):
         if not any("Disconnect this session" in line for line in lines):
@@ -162,16 +217,69 @@ class Repairer:
                 raise RuntimeError("no new bridge session id after /remote-control")
             self.sleep(self.settle)
 
+    def _close_menu(self, pane: str) -> bool:
+        lines = self.tmux.capture(pane)
+        if prompt_state(lines) != "menu" or not any(MENU_FOOTER.search(plain(line)) for line in lines):
+            return False
+        self.tmux.keys(pane, "Escape")
+        self.typed = True
+        self.sleep(self.settle * 2)
+        if prompt_state(self.tmux.capture(pane)) != "empty":
+            raise RuntimeError("Escape did not bring back an empty prompt")
+        return True
+
+    def _reask(self, pane: str):
+        self.sleep(self.settle)
+        if prompt_state(self.tmux.capture(pane)) != "empty":
+            raise RuntimeError("closed a menu but could not ask for it again: the prompt is not empty")
+        self.tmux.keys(pane, REASK, literal=True)
+        self.sleep(self.settle / 2)
+        self.tmux.keys(pane, "Enter")
+
+    def blocker(self, session: Session) -> str | None:
+        """Why this session must not be typed into right now, or None."""
+        if self.active_window and (idle := self.tmux.idle_for(session.pane)) < self.active_window:
+            return f"in use: a client typed into this window {idle:.0f}s ago"
+        state = prompt_state(self.tmux.capture(session.pane))
+        if session.status == "waiting" and self.close_menus and state == "menu":
+            return None
+        if session.status != "idle":
+            return f"session is {session.status}, not idle"
+        if state == "menu" and not self.close_menus:
+            return "a menu or dialog is open"
+        return "prompt has a draft" if state == "draft" else None
+
     def repair(self, session: Session, kind: str) -> str:
         self.typed = False
-        if session.status != "idle":
-            raise RuntimeError(f"session is {session.status}, not idle")
-        if not prompt_is_empty(self.tmux.capture(session.pane)):
-            raise RuntimeError("prompt has a draft or a dialog is open")
+        if reason := self.blocker(session):
+            raise RuntimeError(reason)
+        closed = self.close_menus and self._close_menu(session.pane)
+        try:
+            bridge = self._repair(session, kind)
+        except RuntimeError as exc:
+            if not closed:
+                raise
+            try:
+                self._reask(session.pane)
+            except RuntimeError as reask:
+                raise RuntimeError(f"{exc}; {reask}") from exc
+            raise
+        if closed:
+            self._reask(session.pane)
+        return bridge
+
+    def _repair(self, session: Session, kind: str) -> str:
+        state = prompt_state(self.tmux.capture(session.pane))
+        if state != "empty":
+            raise RuntimeError("a menu or dialog is open" if state == "menu" else "prompt has a draft")
         old = session.bridge
         if kind == "reconnect":
             self._disconnect_from_dialog(session.pane, self._toggle(session.pane))
-        self._toggle(session.pane)
+        self._send_rc(session.pane)
+        try:
+            self._send_rc(session.pane)  # one /rc does not always take; a second is harmless once connected
+        except RuntimeError as exc:
+            log.warning("second /rc into %s: %s", session.pane, exc)
         return self._await_bridge(session, old)
 
 
@@ -214,9 +322,24 @@ def health_now() -> dict[str, bool]:
     return mcp_health() if os.environ.get("CC_RC_WATCHDOG_MCP_URL") else bridge_health(hub_snapshot())
 
 
+def safe_health(health_fn=health_now) -> dict[str, bool] | None:
+    try:
+        return health_fn()
+    except Exception as exc:  # an unreachable HQ must not stop connecting sessions that have no bridge at all
+        log.warning("bridge health unavailable (%s); only sessions without a bridge are repaired", exc)
+        return None
+
+
+def diagnose_all(health: dict[str, bool] | None, sessions: list[Session]) -> dict[int, tuple[Session, str | None]]:
+    rows = {}
+    for s in sessions:
+        kind = diagnose(s, health or {})
+        rows[s.pid] = (s, None if health is None and kind == "reconnect" else kind)
+    return rows
+
+
 def unhealthy(health_fn=health_now, sessions_fn=local_sessions) -> dict[int, tuple[Session, str]]:
-    health = health_fn()
-    return {s.pid: (s, kind) for s in sessions_fn() if (kind := diagnose(s, health))}
+    return {pid: row for pid, row in diagnose_all(safe_health(health_fn), sessions_fn()).items() if row[1]}
 
 
 GAVE_UP = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "cc-rc-watchdog/gave-up.json"
@@ -230,24 +353,37 @@ def _load_gave_up(path: Path) -> set[int]:
 
 
 def run_once(health_fn=health_now, sessions_fn=local_sessions, repairer=None, confirm_after=30.0,
-             sleep=time.sleep, dry_run=False, gave_up_file: Path = GAVE_UP) -> list[dict]:
+             sleep=time.sleep, dry_run=False, gave_up_file: Path = GAVE_UP, report_all=False,
+             renew=False) -> list[dict]:
+    """Repair what stays unhealthy across two checks; `report_all` also lists the sessions left alone.
+
+    `renew` also reconnects healthy bridges: Remote Control takes its name only when a bridge registers, so this is
+    how a /rename or a newer conversation title reaches the app.
+    """
     gave_up = _load_gave_up(gave_up_file)
     first = unhealthy(health_fn, sessions_fn)
-    if not first:
-        return []
-    sleep(confirm_after)
-    second = unhealthy(health_fn, sessions_fn)
+    if first and confirm_after:
+        sleep(confirm_after)
+    current = diagnose_all(safe_health(health_fn), sessions_fn()) if first or report_all or renew else {}
     repairer = repairer or Repairer()
     results = []
-    for pid, (session, kind) in second.items():
-        if pid not in first:
-            continue
+    for pid, (session, kind) in current.items():
+        if renew and not kind and session.bridge:
+            kind, first[pid] = "reconnect", (session, "reconnect")
         row = {"pid": pid, "pane": session.pane, "name": session.name, "kind": kind}
+        if not kind or pid not in first:
+            if report_all:
+                results.append({**row, "result": "connected" if session.bridge else "skipped: not confirmed"})
+            continue
         if pid in gave_up:
             results.append({**row, "result": "skipped: an earlier repair failed in this process"})
             continue
         if dry_run:
-            results.append({**row, "result": "dry-run"})
+            try:
+                reason = repairer.blocker(session)
+            except subprocess.CalledProcessError:
+                reason = "tmux pane unreadable"
+            results.append({**row, "result": f"dry-run: would skip: {reason}" if reason else "dry-run: would repair"})
             continue
         try:
             row["result"] = "repaired"
@@ -263,13 +399,60 @@ def run_once(health_fn=health_now, sessions_fn=local_sessions, repairer=None, co
     return results
 
 
+def peer_command(flags: list[str]) -> str:
+    """The same run on a peer, from the env file its timer reads (`CC_RC_WATCHDOG_FROM` pins the release)."""
+    return (f"set -a; . {ENV_FILE}; set +a; "
+            f'exec ~/.local/bin/uvx -q --from "$CC_RC_WATCHDOG_FROM" cc-rc-watchdog --now --peers= {" ".join(flags)}')
+
+
+def run_peer(host: str, flags: list[str], run=subprocess.run) -> list[dict]:
+    try:
+        out = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", host, peer_command(flags)],
+                  capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return [{"host": host, "result": "failed: timed out"}]
+    rows = []
+    for line in out.stdout.splitlines():
+        try:
+            rows.append({"host": host, **json.loads(line)})
+        except ValueError:
+            continue
+    if out.returncode:
+        rows.append({"host": host, "result": f"failed: exit {out.returncode}: {out.stderr.strip()[-300:]}"})
+    return rows
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true", help="report what would be repaired")
     parser.add_argument("--confirm-after", type=float, default=30.0,
                         help="seconds a session must stay unhealthy before repair")
+    parser.add_argument("--now", action="store_true",
+                        help="repair now (no confirmation wait) and report every session, including those skipped")
+    parser.add_argument("--active-seconds", type=float, default=120.0,
+                        help="skip a pane whose window got client input this recently (default 120; 0 disables)")
+    parser.add_argument("--force", action="store_true", help="also type into panes the owner is using right now")
+    parser.add_argument("--close-menus", action="store_true",
+                        help="Escape an open menu in a waiting (never busy) session, repair, then ask Claude to "
+                             "show the menu again")
+    parser.add_argument("--renew-names", action="store_true",
+                        help="also reconnect healthy sessions so the app shows each one's current title")
+    parser.add_argument("--peers", default=os.environ.get("CC_RC_WATCHDOG_PEERS", ""),
+                        help="with --now: comma-separated ssh aliases to run the same on (default $CC_RC_WATCHDOG_PEERS)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     logging.getLogger("httpx").setLevel(logging.WARNING)
-    for row in run_once(confirm_after=args.confirm_after, dry_run=args.dry_run):
-        log.info(json.dumps(row))
+    active = 0 if args.force else args.active_seconds
+    rows = run_once(confirm_after=0 if args.now else args.confirm_after, dry_run=args.dry_run,
+                    report_all=args.now, renew=args.renew_names,
+                    repairer=Repairer(close_menus=args.close_menus, active_window=active))
+    host = os.uname().nodename
+    rows = [{"host": host, **row} for row in rows]
+    if args.now:
+        flags = [f for f, on in (("--dry-run", args.dry_run), ("--close-menus", args.close_menus),
+                                 ("--force", args.force), ("--renew-names", args.renew_names)) if on]
+        flags.append(f"--active-seconds={args.active_seconds:g}")
+        for peer in filter(None, (p.strip() for p in args.peers.split(","))):
+            rows += run_peer(peer, flags)
+    for row in rows:
+        print(json.dumps(row), flush=True)
