@@ -286,3 +286,15 @@ def test_renew_names_reconnects_a_healthy_bridge_so_it_registers_its_current_tit
     rows = wd.run_once(health_fn=lambda: {"cse_" + "a" * 32: True}, sessions_fn=lambda: [s], repairer=repairer(cli),
                        sleep=lambda _: None, confirm_after=0, renew=True, gave_up_file=tmp_path / "g.json")
     assert rows[0]["kind"] == "reconnect" and rows[0]["result"] == "repaired" and rows[0]["bridge"] != s.bridge
+
+
+def test_a_reused_pid_from_a_dead_session_file_is_ignored(tmp_path):
+    marker, domain = wd.process_marker({"pid": os.getpid()})
+    if marker is None:
+        pytest.skip("no /proc process start times on this platform")
+    (tmp_path / "sessions").mkdir()
+    base = {"pid": os.getpid(), "tmux": "s:@1.%1", "kind": "interactive", "pidDomain": domain}
+    (tmp_path / "sessions" / "a.json").write_text(json.dumps({**base, "procStart": "1"}))
+    assert wd.local_sessions([tmp_path]) == []
+    (tmp_path / "sessions" / "a.json").write_text(json.dumps({**base, "procStart": marker}))
+    assert [s.pid for s in wd.local_sessions([tmp_path])] == [os.getpid()]

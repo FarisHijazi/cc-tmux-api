@@ -17,13 +17,14 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-from .fleet_probe import claude_config_dirs
+from .fleet_probe import claude_config_dirs, process_marker
 
 log = logging.getLogger("rc-watchdog")
 RULE = "────"
@@ -61,6 +62,13 @@ def _alive(pid: int) -> bool:
         return True
 
 
+def _same_process(pid: int, data: dict) -> bool:
+    """A file left by a process that died before a reboot can name a pid reused by anything else."""
+    if "procStart" not in data or not sys.platform.startswith("linux"):
+        return True
+    return process_marker({"pid": pid}) == (data["procStart"], data.get("pidDomain"))
+
+
 def read_session(file: Path) -> Session | None:
     try:
         data = json.loads(file.read_text())
@@ -70,7 +78,7 @@ def read_session(file: Path) -> Session | None:
     if data.get("kind") != "interactive" or "." not in tmux:
         return None
     pid = int(data.get("pid") or 0)
-    if not pid or not _alive(pid):
+    if not pid or not _alive(pid) or not _same_process(pid, data):
         return None
     return Session(pid, tmux.rsplit(".", 1)[1], data.get("bridgeSessionId"), data.get("status") or "",
                    data.get("name") or "", file)
