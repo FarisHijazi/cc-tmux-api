@@ -382,6 +382,24 @@ def _peer_snapshot(host, context, include_ended=True):
         return [root, *children], old[1]
 
 
+def _label_native_machines(rows):
+    """Label each native Remote Control row with the machine whose tmux pane runs its bridge.
+
+    Each host's probe reads the bridge id from the exact Claude process it already
+    validated. Only the presentation label changes; host, id and routing stay native.
+    """
+    owners = {}
+    for row in rows:
+        bridge = row.get('bridge_session_id')
+        if bridge and row.get('transport') != 'native' and row.get('alive', True) is True:
+            owners.setdefault(bridge, set()).add(row.get('host_label'))
+    for row in rows:
+        labels = owners.get(row.get('session')) if row.get('transport') == 'native' else None
+        if labels and len(labels) == 1:
+            row['host_label'] = next(iter(labels))
+    return rows
+
+
 def snapshot(path=(), *, include_ended=True):
     context = _context(path)  # Check BEFORE any cache/target lock or network IO.
     config = [] if os.environ.get('CC_TMUX_NATIVE_ONLY') == '1' else hosts()
@@ -405,7 +423,7 @@ def snapshot(path=(), *, include_ended=True):
         previous = unique.get(key)
         if previous is None or (previous.get('lifecycle') == 'unreachable' and session.get('lifecycle') != 'unreachable'):
             unique[key] = session
-    rows = list(unique.values())
+    rows = _label_native_machines(list(unique.values()))
     if not include_ended:
         rows = [s for s in rows if s.get('alive', True) is True]
     result = dict(hosts=local['hosts'] + [h for r in results for h in r[0]],

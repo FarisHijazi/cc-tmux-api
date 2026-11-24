@@ -122,6 +122,10 @@ class NativeRemote:
         if not self._path.exists():
             self._migrate()
         self._path.chmod(0o600)
+        # A crash mid-transaction leaves a hot journal that only a writer can roll back;
+        # a read-only first open would fail on every restart.
+        with closing(sqlite3.connect(self._path)) as db:
+            db.execute("PRAGMA schema_version").fetchone()
         with closing(sqlite3.connect(self._path.as_uri() + "?mode=ro", uri=True)) as db:
             if db.execute("PRAGMA user_version").fetchone()[0] != 1:
                 raise ValueError("Unsupported native Remote Control database version")

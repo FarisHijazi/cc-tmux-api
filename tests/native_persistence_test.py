@@ -245,3 +245,24 @@ def test_passive_mod_does_not_rewrite_history_but_binding_is_one_transaction(tmp
                "events": [{"id": f"{uuid4()}:1", "kind": "turn.start", "data": {}}]}
     assert client.post("/v1/code/sessions/mod-events", headers=headers, json=rotated).status_code == 500
     assert backend._sessions[sid] == before == NativeRemote(tmp_path, TOKEN)._sessions[sid]
+
+
+def test_a_hot_journal_left_by_a_crash_is_recovered_on_startup(tmp_path):
+    import subprocess
+    import sys
+    legacy(tmp_path / "native-remote.json")
+    expected = NativeRemote(tmp_path, TOKEN)._sessions
+    path = tmp_path / "native-remote.sqlite3"
+    # A writer dies mid-transaction after spilling pages into the database file.
+    crash = (
+        "import os, sqlite3, sys\n"
+        "db = sqlite3.connect(sys.argv[1], isolation_level=None)\n"
+        "db.execute('PRAGMA cache_size=1')\n"
+        "db.execute('BEGIN')\n"
+        "db.execute('UPDATE native_sessions SET payload=?', ('{\"torn\": \"' + 'x' * 200000 + '\"}',))\n"
+        "os._exit(0)\n"
+    )
+    subprocess.run([sys.executable, "-c", crash, str(path)], check=True)
+    assert path.with_name(path.name + "-journal").exists()
+    assert NativeRemote(tmp_path, TOKEN)._sessions == expected
+    assert not path.with_name(path.name + "-journal").exists()

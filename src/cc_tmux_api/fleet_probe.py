@@ -303,7 +303,7 @@ def cli_activity(pane, proc):
     marker, domain = process_marker(proc)
     if not marker:
         return None
-    statuses, sessions = {}, set()
+    statuses, sessions, bridges = {}, set(), set()
     route = f":{pane['window_id']}.{pane['pane_id']}"
     for root in claude_config_dirs():
         path = root / 'sessions' / f"{proc['pid']}.json"
@@ -324,6 +324,10 @@ def cli_activity(pane, proc):
             sid = uuid_value(data.get('sessionId'))
             if sid:
                 sessions.add(sid)
+            # Remote Control writes the bridge as session_<hex>; the HQ native registry names it cse_<hex>.
+            bridge = re.fullmatch(r'(?:session|cse)_([0-9a-f]{32})', str(data.get('bridgeSessionId') or ''))
+            if bridge:
+                bridges.add('cse_' + bridge.group(1))
         except (OSError, ValueError, TypeError):
             continue
     if len(statuses) > 1 or len(sessions) > 1:
@@ -334,6 +338,8 @@ def cli_activity(pane, proc):
         result.update(status=status, updated_at=updated_at)
     if sessions:
         result['sid'] = sessions.pop()
+    if len(bridges) == 1:
+        result['bridge'] = bridges.pop()
     return result or None
 
 
@@ -341,6 +347,8 @@ def metadata(pane, proc):
     activity = cli_activity(pane, proc)
     publisher = ({'cli_status': activity['status'], 'cli_status_ts': activity['updated_at']}
                  if activity and 'status' in activity else {})
+    if activity and activity.get('bridge'):
+        publisher['bridge'] = activity['bridge']
     # In-process resume changes the publisher UUID while argv keeps launch intent.
     sid = (activity or {}).get('sid') or argv_sid(proc)
     exact = f"{pane['session_name']}:{pane['window_index']}.{pane['pane_index']}"
@@ -716,7 +724,7 @@ def inspect(pane, proc):
                 has_question=has_question,
                 attention_kind=attention_kind,
                 color=meta.get('color') or None, updated_at=activity_time(meta, workdir), revision=revision,
-                claude_session_id=meta.get('sid'), managed=managed,
+                claude_session_id=meta.get('sid'), bridge_session_id=meta.get('bridge'), managed=managed,
                 command=pane['pane_current_command'], tail=tail, menu=menu,
                 event=meta.get('event'), event_id=event_id or None,
                 menu_signature=menu['signature'] if menu else None,

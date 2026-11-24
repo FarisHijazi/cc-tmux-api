@@ -801,6 +801,26 @@ def test_cli_publisher_tracks_current_identity_and_activity(cli_publisher):
     assert REAL_CLI_ACTIVITY(pane, proc) == {'status': 'idle', 'updated_at': epoch + 2, 'sid': OTHER}
 
 
+HEX = '73a1e620b49b459ba0992f332211f405'
+
+
+def test_cli_publisher_reports_its_remote_control_bridge_in_hq_form(cli_publisher, monkeypatch, tmp_path):
+    pane, proc, publish, epoch = cli_publisher
+    publish(sessionId=OTHER, bridgeSessionId=f'session_{HEX}')
+    assert REAL_CLI_ACTIVITY(pane, proc)['bridge'] == f'cse_{HEX}'
+    pane.update(session_name='toy', window_index='0', pane_index='0')
+    monkeypatch.setattr(probe, 'cli_activity', REAL_CLI_ACTIVITY)
+    monkeypatch.setattr(probe, 'argv_sid', lambda _: None)
+    monkeypatch.setattr(probe, 'route_sid', lambda *_: None)
+    monkeypatch.setattr(probe, 'json_lines', lambda _: [])
+    monkeypatch.setattr(probe, 'NOTIFY_STATE', tmp_path / 'notify')
+    assert probe.metadata(pane, proc)['bridge'] == f'cse_{HEX}'
+    # An Anthropic-hosted bridge, a cleared bridge or a malformed id names no HQ session.
+    for value in ('session_01LVUCRX6iq6D1BuQ5bBGqKf', None, f'cse_{HEX}x'):
+        publish(sessionId=OTHER, bridgeSessionId=value)
+        assert 'bridge' not in REAL_CLI_ACTIVITY(pane, proc)
+
+
 def test_metadata_preserves_verified_publisher_identity_and_time(cli_publisher, monkeypatch, tmp_path):
     pane, proc, publish, epoch = cli_publisher
     pane.update(session_name='toy', window_index='0', pane_index='0')

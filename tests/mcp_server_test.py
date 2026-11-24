@@ -57,6 +57,13 @@ def test_lists_live_sessions_across_hosts_and_filters(hq):
     assert call(server, "list_sessions")[0]["title"] == "ai course"
 
 
+def test_lists_the_remote_control_session_a_tmux_pane_runs():
+    rows = [{**SESSIONS[0], "bridge_session_id": "cse_" + "a" * 32}, SESSIONS[1]]
+    server = mcp_server.build(lambda: httpx.Client(base_url="http://hq", transport=httpx.MockTransport(
+        lambda r: httpx.Response(200, json={"sessions": rows}))))
+    assert [r["bridge_session_id"] for r in call(server, "list_sessions")] == ["cse_" + "a" * 32, None]
+
+
 @pytest.mark.parametrize("include_ended", [False, True])
 def test_discovery_requests_only_the_history_the_caller_needs(include_ended):
     requests = []
