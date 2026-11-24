@@ -55,6 +55,8 @@ def _row(s: dict) -> dict:
         "online": s.get("online"),
         "transport": s.get("transport", "tmux"),
         "provider": s.get("provider", "claude"),
+        # The Remote Control session this tmux pane's Claude runs, so clients list the pair once.
+        "bridge_session_id": s.get("bridge_session_id"),
     }
 
 
