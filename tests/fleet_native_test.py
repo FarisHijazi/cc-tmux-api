@@ -102,3 +102,23 @@ def test_observer_rejects_other_transports_and_cascade_cycles(backend, monkeypat
     native_id = fleet._encode('@native', {'native': 'cse_toy'})
     with pytest.raises(fleet.FleetError, match='cycle'):
         fleet.observe(native_id, path=('toy',))
+
+
+def test_native_rows_take_the_machine_label_of_the_pane_running_their_bridge():
+    rows = [
+        dict(session='cse_a', transport='native', host='@native', host_label='Remote Control'),
+        dict(session='cse_b', transport='native', host='@native', host_label='Remote Control'),
+        dict(session='cse_c', transport='native', host='@native', host_label='Remote Control'),
+        dict(session='work', transport='tmux', host='dev/local', host_label='Dev / Dev',
+             bridge_session_id='cse_a', alive=True),
+        dict(session='gone', transport='tmux', host='client/local', host_label='Client / Client',
+             bridge_session_id='cse_b', alive=False),
+        dict(session='x', transport='tmux', host='dev/local', host_label='Dev / Dev',
+             bridge_session_id='cse_c', alive=True),
+        dict(session='y', transport='tmux', host='work/local', host_label='Work / Work',
+             bridge_session_id='cse_c', alive=True),
+    ]
+    labelled = fleet._label_native_machines(copy.deepcopy(rows))
+    assert [r['host_label'] for r in labelled[:3]] == ['Dev / Dev', 'Remote Control', 'Remote Control']
+    # Routing identity is unchanged; only the presentation label moves.
+    assert all(r['host'] == '@native' for r in labelled[:3])
