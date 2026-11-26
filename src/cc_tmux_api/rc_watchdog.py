@@ -299,7 +299,7 @@ def hub_snapshot() -> dict:
         token = Path(path).expanduser().read_text().strip()
     url = os.environ.get("CC_TMUX_HQ_URL", "http://127.0.0.1:8377").rstrip("/")
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    response = httpx.get(url + "/api/sessions", headers=headers, timeout=60)
+    response = httpx.get(url + "/api/sessions", params={"include_ended": "false"}, headers=headers, timeout=60)
     response.raise_for_status()
     return response.json()
 
