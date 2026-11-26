@@ -586,17 +586,52 @@ def test_oversized_permission_response_does_not_consume_request(native):
     assert backend.replay(sid, 0) == []
 
 
-def test_archived_transport_records_expire_but_unreachable_records_do_not(native):
+def test_archived_transport_records_expire_and_abandoned_records_end_first(native):
     from cc_tmux_api.session_history import RETENTION_SECONDS
 
     backend, client, launch = native
     archived, _, _ = register(native)
-    retained, _, _ = register(native)
+    abandoned, _, _ = register(native)
     client.post(f"/v1/code/sessions/{archived}/archive", headers=launch, json={})
     backend._sessions[archived]["archived_at"] -= RETENTION_SECONDS + 1
-    backend._sessions[retained]["last_seen"] -= RETENTION_SECONDS + 1
-    assert [row["id"] for row in backend.rows()] == [retained]
+    backend._sessions[abandoned]["last_seen"] -= RETENTION_SECONDS + 1
+    assert [(row["id"], row["lifecycle"]) for row in backend.rows()] == [(abandoned, "ended")]
     assert archived not in NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions
+
+
+def test_silent_session_is_archived_only_after_the_abandon_window(native):
+    from cc_tmux_api.native_remote import ABANDONED_SECONDS
+
+    backend, client, launch = native
+    quiet, auth, epoch = register(native)
+    gone, _, _ = register(native)
+    backend._sessions[quiet]["last_seen"] -= ABANDONED_SECONDS - 60
+    backend._sessions[gone]["last_seen"] -= ABANDONED_SECONDS + 1
+    lifecycles = {row["id"]: row["lifecycle"] for row in backend.rows()}
+    assert lifecycles == {quiet: "unreachable", gone: "ended"}
+    reloaded = NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions
+    assert reloaded[gone]["archived"] and not reloaded[quiet]["archived"]
+    assert client.post(f"/v1/code/sessions/{gone}/bridge", json={}, headers=launch).status_code == 410
+
+
+def test_capacity_counts_only_unarchived_and_evicts_oldest_archived(native, monkeypatch):
+    import cc_tmux_api.native_remote as native_remote
+
+    monkeypatch.setattr(native_remote, "MAX_SESSIONS", 3)
+    backend, client, launch = native
+    old, newer, live = (register(native)[0] for _ in range(3))
+    for sid in (old, newer):
+        client.post(f"/v1/code/sessions/{sid}/archive", headers=launch, json={})
+    backend._sessions[old]["archived_at"] -= 60
+    fresh, _, _ = register(native)
+    assert set(backend._sessions) == {newer, live, fresh}
+    assert set(NativeRemote(backend._path.parent, "test-" + "x" * 40)._sessions) == {
+        newer, live, fresh}
+    client.post(f"/v1/code/sessions/{newer}/archive", headers=launch, json={})
+    register(native)
+    full = client.post("/v1/code/sessions", json={}, headers=launch)
+    assert full.status_code == 503
+    assert len(backend._sessions) == 3
 
 
 def test_local_native_approval_dismisses_web_pending_prompt(native):
