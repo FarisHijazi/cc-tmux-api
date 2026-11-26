@@ -33,6 +33,8 @@ MAX_EVENTS = 1000
 MAX_MESSAGES = 500
 MAX_BODY = 12 * 1024 * 1024  # Native HTTP event batches permit 10 MiB plus JSON framing.
 HEARTBEAT_TIMEOUT = 90
+MAX_SESSIONS = 1000
+ABANDONED_SECONDS = 7 * 24 * 60 * 60
 MAX_ACTION_BYTES = 256 * 1024
 MAX_QUEUE_BYTES = 1024 * 1024
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
@@ -703,17 +705,45 @@ class NativeRemote:
         )
 
     def _prune(self):
+        # A CLI killed with its tmux session often never calls /archive, so silence
+        # this long is treated as the end the CLI never reported.
+        now = time.time()
+        abandoned = [
+            session
+            for session in self._sessions.values()
+            if not session["archived"] and now - session["last_seen"] > ABANDONED_SECONDS
+        ]
+        for session in abandoned:
+            session["archived"] = True
+            session["archived_at"] = now
+            session["revision"] += 1
+            self._mirror(session, "archive")
         expired = [
             sid
             for sid, session in self._sessions.items()
             if session["archived"]
-            and time.time() - session.get("archived_at", session["last_seen"]) > RETENTION_SECONDS
+            and now - session.get("archived_at", session["last_seen"]) > RETENTION_SECONDS
         ]
-        for sid in expired:
+        self._drop(expired)
+        if abandoned or expired:
+            self._save(*abandoned, deleted=expired)
+
+    def _drop(self, sids):
+        for sid in sids:
             self._sessions.pop(sid)
             self._streams.pop(sid, None)
-        if expired:
-            self._save(deleted=expired)
+
+    def _make_room(self):
+        """Ids of the oldest archived sessions evicted so one more fits under MAX_SESSIONS."""
+        if sum(not s["archived"] for s in self._sessions.values()) >= MAX_SESSIONS:
+            raise HTTPException(503, "Native session capacity reached")
+        archived = sorted(
+            (s for s in self._sessions.values() if s["archived"]),
+            key=lambda s: s.get("archived_at", s["last_seen"]),
+        )
+        evicted = [s["id"] for s in archived[: len(self._sessions) - MAX_SESSIONS + 1]]
+        self._drop(evicted)
+        return evicted
 
     def rows(self):
         with self._lock:
@@ -1307,8 +1337,7 @@ class NativeRemote:
                 self._prune()
                 if _size(config) > MAX_METADATA_BYTES:
                     raise HTTPException(413, "Native configuration exceeds storage limit")
-                if len(self._sessions) >= 1000:
-                    raise HTTPException(503, "Native session capacity reached")
+                evicted = self._make_room()
                 sid = "cse_" + uuid4().hex
                 session = dict(
                     id=sid,
@@ -1329,7 +1358,7 @@ class NativeRemote:
                     private=request.headers.get("x-hq-private") == "1",
                 )
                 self._sessions[sid] = session
-                self._save(session)
+                self._save(session, deleted=evicted)
                 self._mirror(session)
             return {"session": {"id": sid}}
 

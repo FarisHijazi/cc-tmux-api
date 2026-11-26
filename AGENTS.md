@@ -56,7 +56,10 @@ Existing ownership boundaries:
 - `native_remote.py` owns optional native Remote Control v2 transport state,
   authenticated per-session worker streams and structured pending controls.
   The existing fleet remains the action/receipt owner; SessionHistory remains
-  the lifecycle-summary owner. Native disconnect is never evidence of end.
+  the lifecycle-summary owner. A short native disconnect is never evidence of end; only 7 days of silence
+  (`ABANDONED_SECONDS`) archives a session whose CLI died without `/archive`. The
+  1000-session cap (`MAX_SESSIONS`) counts unarchived sessions; the oldest archived
+  rows are evicted to stay under it.
   Keep human input provenance, single stream leases, epochs and delivery ACKs
   aligned with the tested CLI. Native routes require their separate launch or
   worker credential even when browser pairing is disabled. Read
